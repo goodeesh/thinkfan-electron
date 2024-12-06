@@ -1,29 +1,87 @@
-import React, { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Settings, Thermometer, Fan } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+const electron = window.require('electron')
+const { ipcRenderer } = electron
+
+interface Sensor {
+  type: string;
+  path: string;
+  name: string;
+}
+
+interface Fan {
+  type: string;
+  path: string;
+  name: string;
+}
+
+interface Level {
+  level: number;
+  low: number;
+  high: number;
+}
 
 const ThinkfanConfig = () => {
-  const [configData, setConfigData] = useState({
-    sensors: [
-      { type: 'hwmon', path: '/sys/class/hwmon/hwmon0/temp1_input', name: 'CPU' },
-      { type: 'hwmon', path: '/sys/class/hwmon/hwmon1/temp1_input', name: 'GPU' }
-    ],
-    fans: [
-      { type: 'hwmon', path: '/sys/class/hwmon/hwmon2/fan1_input', name: 'CPU Fan' }
-    ],
-    levels: [
-      { level: 0, low: 0, high: 55 },
-      { level: 1, low: 48, high: 65 },
-      { level: 2, low: 55, high: 75 },
-      { level: 3, low: 65, high: 85 },
-      { level: 4, low: 75, high: 95 },
-      { level: 7, low: 85, high: 255 }
-    ]
+  const [configData, setConfigData] = useState<{
+    sensors: Sensor[];
+    fans: Fan[];
+    levels: Level[];
+  }>({
+    sensors: [],
+    fans: [],
+    levels: []
   });
+
+  const [editingLevel, setEditingLevel] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleLevelEdit = (index: number) => {
+    setEditingLevel(index);
+  };
+
+  const handleLevelSave = async (index: number, updatedLevel: Level) => {
+    try {
+      setError(null);
+      await ipcRenderer.invoke('update-thinkfan-level', { index, level: updatedLevel });
+      const newLevels = [...configData.levels];
+      newLevels[index] = updatedLevel;
+      setConfigData({ ...configData, levels: newLevels });
+      setEditingLevel(null);
+    } catch (error) {
+      console.error('Failed to update level:', error);
+      setError('Failed to update configuration. Make sure you have the necessary permissions.');
+    }
+  };
+
+  const handleLevelCancel = () => {
+    setEditingLevel(null);
+  };
+
+  useEffect(() => {
+    const fetchConfig = async () => {
+      try {
+        const data = await ipcRenderer.invoke('read-thinkfan-config');
+        setConfigData(data);
+      } catch (error) {
+        console.error('Failed to fetch thinkfan config:', error);
+        // Add error handling here (e.g., show error message to user)
+      }
+    };
+
+    fetchConfig();
+  }, []);
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4">
+      {error && (
+        <div className="mb-4 p-4 border border-red-500 bg-red-50 text-red-700 rounded-md">
+          {error}
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -95,12 +153,71 @@ const ThinkfanConfig = () => {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {configData.levels.map((level, index) => (
                       <div key={index} className="p-4 border rounded-lg">
-                        <div className="flex justify-between items-center">
-                          <h3 className="font-medium">Level {level.level}</h3>
-                          <div className="text-sm">
-                            <span>{level.low}°C - {level.high}°C</span>
+                        {editingLevel === index ? (
+                          <div className="space-y-4">
+                            <div>
+                              <label className="text-sm font-medium">Level</label>
+                              <Input
+                                type="number"
+                                value={level.level}
+                                onChange={(e) => {
+                                  const newLevels = [...configData.levels];
+                                  newLevels[index] = {
+                                    ...level,
+                                    level: parseInt(e.target.value)
+                                  };
+                                  setConfigData({ ...configData, levels: newLevels });
+                                }}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium">Low Temperature (°C)</label>
+                              <Input
+                                type="number"
+                                value={level.low}
+                                onChange={(e) => {
+                                  const newLevels = [...configData.levels];
+                                  newLevels[index] = {
+                                    ...level,
+                                    low: parseInt(e.target.value)
+                                  };
+                                  setConfigData({ ...configData, levels: newLevels });
+                                }}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-sm font-medium">High Temperature (°C)</label>
+                              <Input
+                                type="number"
+                                value={level.high}
+                                onChange={(e) => {
+                                  const newLevels = [...configData.levels];
+                                  newLevels[index] = {
+                                    ...level,
+                                    high: parseInt(e.target.value)
+                                  };
+                                  setConfigData({ ...configData, levels: newLevels });
+                                }}
+                              />
+                            </div>
+                            <div className="flex gap-2">
+                              <Button onClick={() => handleLevelSave(index, level)}>Save</Button>
+                              <Button variant="outline" onClick={handleLevelCancel}>Cancel</Button>
+                            </div>
                           </div>
-                        </div>
+                        ) : (
+                          <div className="flex justify-between items-center">
+                            <div>
+                              <h3 className="font-medium">Level {level.level}</h3>
+                              <p className="text-sm text-gray-500">
+                                {level.low}°C - {level.high}°C
+                              </p>
+                            </div>
+                            <Button variant="outline" onClick={() => handleLevelEdit(index)}>
+                              Edit
+                            </Button>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
