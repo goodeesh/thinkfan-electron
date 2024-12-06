@@ -25,6 +25,14 @@ interface Level {
   high: number;
 }
 
+interface AvailableSensor {
+  adapter: string;
+  name: string;
+  sensor: string;
+  path: string;
+  current: number;
+}
+
 const ThinkfanConfig = () => {
   const [configData, setConfigData] = useState<{
     sensors: Sensor[];
@@ -39,6 +47,7 @@ const ThinkfanConfig = () => {
   const [pendingChanges, setPendingChanges] = useState<Level[]>([]);
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [availableSensors, setAvailableSensors] = useState<AvailableSensor[]>([]);
 
   const handleLevelEdit = (index: number) => {
     setEditingLevel(index);
@@ -86,6 +95,18 @@ const ThinkfanConfig = () => {
     setPendingChanges(newLevels);
   };
 
+  const handleSensorSelect = async (sensorPath: string) => {
+    try {
+      setError(null);
+      console.log('Selecting sensor:', sensorPath);
+      const updatedConfig = await ipcRenderer.invoke('update-thinkfan-sensor', sensorPath);
+      setConfigData(updatedConfig);
+    } catch (error) {
+      console.error('Failed to update sensor:', error);
+      setError('Failed to update sensor configuration. Make sure you have the necessary permissions.');
+    }
+  };
+
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -103,6 +124,21 @@ const ThinkfanConfig = () => {
   useEffect(() => {
     setPendingChanges(configData.levels);
   }, [configData]);
+
+  useEffect(() => {
+    const fetchSensors = async () => {
+      try {
+        const sensors = await ipcRenderer.invoke('get-available-sensors');
+        setAvailableSensors(sensors);
+      } catch (error) {
+        console.error('Failed to fetch available sensors:', error);
+      }
+    };
+    fetchSensors();
+    // Set up polling every 2 seconds
+    const interval = setInterval(fetchSensors, 2000);
+    return () => clearInterval(interval);
+  }, []);
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4">
@@ -136,15 +172,28 @@ const ThinkfanConfig = () => {
               <Card>
                 <CardContent className="mt-4">
                   <div className="space-y-4">
-                    {configData.sensors.map((sensor, index) => (
+                    <div className="mb-4">
+                      <h3 className="text-lg font-medium">Available Temperature Sensors</h3>
+                      <p className="text-sm text-gray-500">Select a sensor to use for fan control</p>
+                    </div>
+                    {availableSensors.map((sensor, index) => (
                       <div key={index} className="p-4 border rounded-lg">
                         <div className="flex justify-between items-center">
                           <div>
-                            <h3 className="font-medium">{sensor.name}</h3>
-                            <p className="text-sm text-gray-500">{sensor.path}</p>
+                            <h3 className="font-medium">{sensor.name} - {sensor.sensor}</h3>
+                            <p className="text-sm text-gray-500">{sensor.adapter}</p>
+                            <p className="text-xs text-gray-400">{sensor.path || 'No path available'}</p>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-sm">Type: {sensor.type}</span>
+                          <div className="flex items-center gap-4">
+                            <span className="text-sm font-medium">{sensor.current.toFixed(1)}°C</span>
+                            <Button
+                              variant="outline"
+                              onClick={() => sensor.path && handleSensorSelect(sensor.path)}
+                              disabled={!sensor.path}
+                              className={!sensor.path ? 'opacity-50 cursor-not-allowed' : ''}
+                            >
+                              {sensor.path ? 'Use This Sensor' : 'No Path Available'}
+                            </Button>
                           </div>
                         </div>
                       </div>
