@@ -36,6 +36,7 @@ const ThinkfanConfig = () => {
     levels: []
   });
 
+  const [pendingChanges, setPendingChanges] = useState<Level[]>([]);
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,22 +44,46 @@ const ThinkfanConfig = () => {
     setEditingLevel(index);
   };
 
-  const handleLevelSave = async (index: number, updatedLevel: Level) => {
+  const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, value: number) => {
+    const newLevels = [...pendingChanges];
+    if (isHigh) {
+      newLevels[index] = { ...newLevels[index], high: value };
+      if (index < newLevels.length - 1) {
+        newLevels[index + 1] = { ...newLevels[index + 1], low: value };
+      }
+    } else {
+      newLevels[index] = { ...newLevels[index], low: value };
+      if (index > 0) {
+        newLevels[index - 1] = { ...newLevels[index - 1], high: value };
+      }
+    }
+    setPendingChanges(newLevels);
+  };
+
+  const handleApplyChanges = async () => {
     try {
       setError(null);
-      await ipcRenderer.invoke('update-thinkfan-level', { index, level: updatedLevel });
-      const newLevels = [...configData.levels];
-      newLevels[index] = updatedLevel;
-      setConfigData({ ...configData, levels: newLevels });
+      const updatedConfig = await ipcRenderer.invoke('update-thinkfan-config', pendingChanges);
+      setConfigData(updatedConfig);
       setEditingLevel(null);
     } catch (error) {
-      console.error('Failed to update level:', error);
+      console.error('Failed to update levels:', error);
       setError('Failed to update configuration. Make sure you have the necessary permissions.');
     }
   };
 
   const handleLevelCancel = () => {
+    setPendingChanges(configData.levels);
     setEditingLevel(null);
+  };
+
+  const handleLevelChange = (index: number, field: keyof Level, value: number) => {
+    const newLevels = [...pendingChanges];
+    newLevels[index] = {
+      ...newLevels[index],
+      [field]: value
+    };
+    setPendingChanges(newLevels);
   };
 
   useEffect(() => {
@@ -74,6 +99,10 @@ const ThinkfanConfig = () => {
 
     fetchConfig();
   }, []);
+
+  useEffect(() => {
+    setPendingChanges(configData.levels);
+  }, [configData]);
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4">
@@ -159,49 +188,27 @@ const ThinkfanConfig = () => {
                               <label className="text-sm font-medium">Level</label>
                               <Input
                                 type="number"
-                                value={level.level}
-                                onChange={(e) => {
-                                  const newLevels = [...configData.levels];
-                                  newLevels[index] = {
-                                    ...level,
-                                    level: parseInt(e.target.value)
-                                  };
-                                  setConfigData({ ...configData, levels: newLevels });
-                                }}
+                                value={pendingChanges[index].level}
+                                onChange={(e) => handleLevelChange(index, 'level', parseInt(e.target.value))}
                               />
                             </div>
                             <div>
                               <label className="text-sm font-medium">Low Temperature (°C)</label>
                               <Input
                                 type="number"
-                                value={level.low}
-                                onChange={(e) => {
-                                  const newLevels = [...configData.levels];
-                                  newLevels[index] = {
-                                    ...level,
-                                    low: parseInt(e.target.value)
-                                  };
-                                  setConfigData({ ...configData, levels: newLevels });
-                                }}
+                                value={pendingChanges[index].low}
+                                onChange={(e) => handleTemperatureBoundaryChange(index, false, parseInt(e.target.value))}
                               />
                             </div>
                             <div>
                               <label className="text-sm font-medium">High Temperature (°C)</label>
                               <Input
                                 type="number"
-                                value={level.high}
-                                onChange={(e) => {
-                                  const newLevels = [...configData.levels];
-                                  newLevels[index] = {
-                                    ...level,
-                                    high: parseInt(e.target.value)
-                                  };
-                                  setConfigData({ ...configData, levels: newLevels });
-                                }}
+                                value={pendingChanges[index].high}
+                                onChange={(e) => handleTemperatureBoundaryChange(index, true, parseInt(e.target.value))}
                               />
                             </div>
                             <div className="flex gap-2">
-                              <Button onClick={() => handleLevelSave(index, level)}>Save</Button>
                               <Button variant="outline" onClick={handleLevelCancel}>Cancel</Button>
                             </div>
                           </div>
@@ -221,6 +228,11 @@ const ThinkfanConfig = () => {
                       </div>
                     ))}
                   </div>
+                  {pendingChanges.length > 0 && (
+                    <div className="mt-4 flex justify-end">
+                      <Button onClick={handleApplyChanges}>Apply Changes</Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </TabsContent>

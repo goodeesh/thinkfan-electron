@@ -95,6 +95,35 @@ ipcMain.handle('update-thinkfan-level', async (_event, { index, level }: { index
   }
 });
 
+ipcMain.handle('update-thinkfan-config', async (_event, levels) => {
+  try {
+    const configContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8');
+    const lines = configContent.split('\n');
+    let levelIndex = 0;
+    
+    const newLines = lines.map(line => {
+      if (line.startsWith('(') && line.endsWith(')')) {
+        const level = levels[levelIndex];
+        levelIndex++;
+        return `(${level.level}, ${level.low}, ${level.high})`;
+      }
+      return line;
+    });
+
+    const newConfig = newLines.join('\n');
+    const tempFile = '/tmp/thinkfan.conf.tmp';
+    await fs.writeFile(tempFile, newConfig, 'utf-8');
+    
+    await execAsync(`pkexec sh -c 'cat ${tempFile} > /etc/thinkfan.conf && systemctl restart thinkfan'`);
+    await fs.unlink(tempFile);
+    
+    return await parseThinkfanConfig(newConfig);
+  } catch (error) {
+    console.error('Error updating thinkfan config:', error);
+    throw error;
+  }
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 800,
