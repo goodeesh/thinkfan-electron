@@ -12,6 +12,7 @@ let mainWindow: BrowserWindow | null = null
 
 // Add at the top with other imports
 const sensorReadingsCache = new Map<string, { readings: number[], timestamp: number }>();
+const sensorPathCache = new Map<string, string>();
 
 // Function to parse thinkfan config file
 async function parseThinkfanConfig(content: string) {
@@ -225,16 +226,9 @@ ipcMain.handle('get-available-sensors', async () => {
                 
                 // Only include sensors with reasonable temperature readings
                 if (current > 0 && current < 105) {
-                  const matchingPath = sensorPaths.find(path => {
-                    const normalizedPath = path.toLowerCase();
-                    const normalizedAdapter = adapter.toLowerCase().replace(/[-_]/g, '');
-                    const normalizedSensor = sensorName.toLowerCase().replace(/[-_]/g, '');
-                    return normalizedPath.includes(normalizedAdapter) || 
-                           normalizedPath.includes(normalizedSensor) ||
-                           normalizedPath.includes('thermal');
-                  });
-
+                  const matchingPath = await findPreferredSensorPath(adapter);
                   if (matchingPath) {
+                    console.log(`Using preferred path for ${adapter}/${sensorName}: ${matchingPath}`);
                     availableSensors.push({
                       adapter,
                       name: sensorName,
@@ -242,6 +236,8 @@ ipcMain.handle('get-available-sensors', async () => {
                       path: matchingPath,
                       current
                     });
+                  } else {
+                    console.log(`No preferred path found for sensor ${adapter}/${sensorName}`);
                   }
                 }
               }
@@ -448,5 +444,137 @@ async function updateThinkfanConfig(newConfig: string, format: 'yaml' | 'conf') 
     } catch (e) {
       console.error('Failed to clean up temp file:', e);
     }
+  }
+}
+
+// Add this function to help find stable paths
+async function findStableSensorPath(sensorInfo: { adapter: string, name: string }): Promise<string | null> {
+  try {
+    // Try multiple methods to find the most stable path
+    const methods = [
+      // Method 1: Use symlinks to find real device
+      async () => {
+        const command = `find /sys/devices -type l -name "hwmon*" -ls | grep "${sensorInfo.adapter.toLowerCase()}"`;
+        const { stdout } = await execAsync(command);
+        if (stdout) {
+          const realPath = await fs.readlink(stdout.trim().split(' ').pop() || '');
+          return realPath;
+        }
+        return null;
+      },
+      // Method 2: Search by device name in a stable path
+      async () => {
+        const command = `find /sys/class/hwmon -type f -name "name" -exec sh -c 'echo "{} $(cat {})"' \\; | grep -i "${sensorInfo.adapter}"`;
+        const { stdout } = await execAsync(command);
+        if (stdout) {
+          return path.dirname(stdout.split(' ')[0]);
+        }
+        return null;
+      },
+      // Method 3: Use device tree path if available
+      async () => {
+        const command = `find /sys/devices/platform -name "temp*_input" | grep -i "${sensorInfo.adapter}"`;
+        const { stdout } = await execAsync(command);
+        return stdout.trim() || null;
+      }
+    ];
+
+    for (const method of methods) {
+      try {
+        const result = await method();
+        if (result) return result;
+      } catch (e) {
+        console.debug('Path finding method failed:', e);
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error finding stable sensor path:', error);
+    return null;
+  }
+}
+
+// Example of more stable paths to try
+const stablePaths = [
+  '/sys/devices/platform/thinkpad_hwmon/hwmon/*/temp*_input',
+  '/sys/devices/virtual/thermal/thermal_zone*/temp',
+  '/sys/class/hwmon/hwmon*/temp*_input'
+];
+
+// Add this helper function
+async function resolveRealSensorPath(basePath: string): Promise<string> {
+  try {
+    const realPath = await fs.realpath(basePath);
+    return realPath;
+  } catch (error) {
+    console.error('Error resolving real path:', error);
+    return basePath;
+  }
+}
+
+// Add this function to manage the cache
+async function getCachedSensorPath(sensorInfo: { adapter: string, name: string }): Promise<string | null> {
+  const cacheKey = `${sensorInfo.adapter}-${sensorInfo.name}`;
+  
+  if (sensorPathCache.has(cacheKey)) {
+    // Verify the cached path still exists
+    try {
+      await fs.access(sensorPathCache.get(cacheKey)!);
+      return sensorPathCache.get(cacheKey)!;
+    } catch {
+      sensorPathCache.delete(cacheKey);
+    }
+  }
+
+  const stablePath = await findStableSensorPath(sensorInfo);
+  if (stablePath) {
+    sensorPathCache.set(cacheKey, stablePath);
+  }
+  return stablePath;
+}
+
+type ThermalZone = {
+  path: string;
+  type: string;
+  temp: number;
+};
+
+async function findPreferredSensorPath(adapter: string): Promise<string | null> {
+  try {
+    // Get all thermal zones
+    const { stdout } = await execAsync('find /sys/devices/virtual/thermal/thermal_zone* -maxdepth 0 -type d');
+    const thermalZones = stdout.trim().split('\n');
+    
+    const zones: ThermalZone[] = [];
+    for (const zonePath of thermalZones) {
+      try {
+        const [type, temp] = await Promise.all([
+          fs.readFile(`${zonePath}/type`, 'utf-8'),
+          fs.readFile(`${zonePath}/temp`, 'utf-8')
+        ]);
+        
+        zones.push({
+          path: `${zonePath}/temp`,
+          type: type.trim(),
+          temp: parseInt(temp) / 1000
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    // Match zone by type
+    const normalizedAdapter = adapter.toLowerCase().replace(/[-_]/g, '');
+    const matchingZone = zones.find(zone => {
+      const normalizedType = zone.type.toLowerCase();
+      return normalizedType.includes(normalizedAdapter) || 
+             normalizedAdapter.includes(normalizedType);
+    });
+
+    return matchingZone?.path || null;
+  } catch (error) {
+    console.debug('Error finding thermal zone:', error);
+    return null;
   }
 }

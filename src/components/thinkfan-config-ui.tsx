@@ -16,6 +16,11 @@ interface AvailableSensor {
   current: number;
 }
 
+interface SensorReading {
+  timestamp: number;
+  value: number;
+}
+
 const ThinkfanConfig = () => {
   const [configData, setConfigData] = useState<ThinkfanConfig>({
     sensors: [],
@@ -29,6 +34,8 @@ const ThinkfanConfig = () => {
   const [availableSensors, setAvailableSensors] = useState<AvailableSensor[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [validatedSensors, setValidatedSensors] = useState<AvailableSensor[]>([]);
+  const [selectedSensor, setSelectedSensor] = useState<string | null>(null);
+  const [sensorReadings, setSensorReadings] = useState<SensorReading[]>([]);
 
   const handleLevelEdit = (index: number) => {
     setEditingLevel(index);
@@ -93,6 +100,7 @@ const ThinkfanConfig = () => {
   };
 
   const handleSensorSelect = async (sensorPath: string) => {
+    setSelectedSensor(sensorPath);
     try {
       setError(null);
       console.log('Selecting sensor:', sensorPath);
@@ -130,9 +138,12 @@ const ThinkfanConfig = () => {
       try {
         const data = await ipcRenderer.invoke('read-thinkfan-config');
         setConfigData(data);
+        if (data.sensors && data.sensors[0]?.path) {
+          setSelectedSensor(data.sensors[0].path);
+        }
       } catch (error) {
         console.error('Failed to fetch thinkfan config:', error);
-        // Add error handling here (e.g., show error message to user)
+        setError('Failed to fetch thinkfan config');
       }
     };
 
@@ -163,6 +174,33 @@ const ThinkfanConfig = () => {
     // Cleanup
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!selectedSensor) return;
+
+    const updateReading = async () => {
+      try {
+        const reading = await ipcRenderer.invoke('get-sensor-reading', selectedSensor);
+        setSensorReadings(prev => [
+          ...prev,
+          { timestamp: Date.now(), value: reading }
+        ].slice(-10));
+      } catch (error) {
+        console.error('Failed to read sensor:', error);
+        // If path becomes invalid, try to find new path
+        setSelectedSensor(null);
+        setError('Sensor path changed or became unavailable. Please reselect the sensor.');
+      }
+    };
+
+    // Initial reading
+    updateReading();
+    
+    // Update every second
+    const interval = setInterval(updateReading, 1000);
+    
+    return () => clearInterval(interval);
+  }, [selectedSensor]);
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4">
@@ -322,6 +360,46 @@ const ThinkfanConfig = () => {
           </Tabs>
         </CardContent>
       </Card>
+      {selectedSensor && (
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle>Current Sensor</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="font-medium">Path:</span>
+                <span className="font-mono text-sm">{selectedSensor}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="font-medium">Current Temperature:</span>
+                <span className="text-lg font-bold">
+                  {sensorReadings.length > 0 
+                    ? `${sensorReadings[sensorReadings.length - 1].value.toFixed(1)}°C`
+                    : 'Loading...'}
+                </span>
+              </div>
+              <div className="h-20 mt-4">
+                {sensorReadings.length > 1 && (
+                  <div className="flex items-end justify-between h-full">
+                    {sensorReadings.map((reading, i) => {
+                      const height = `${(reading.value / 100) * 100}%`;
+                      return (
+                        <div 
+                          key={reading.timestamp}
+                          className="w-4 bg-primary/60 rounded-t"
+                          style={{ height }}
+                          title={`${reading.value.toFixed(1)}°C`}
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 };
