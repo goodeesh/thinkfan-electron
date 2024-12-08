@@ -3,6 +3,8 @@ import * as path from 'path'
 import * as fs from 'fs/promises'
 import { promisify } from 'util';
 import { exec } from 'child_process';
+import { parse as parseYAML, stringify as stringifyYAML } from 'yaml';
+import { ThinkfanConfig, ThinkfanLevel } from './types/thinkfan';
 const execAsync = promisify(exec);
 
 const isDev = process.env.NODE_ENV === 'development'
@@ -13,82 +15,126 @@ const sensorReadingsCache = new Map<string, { readings: number[], timestamp: num
 
 // Function to parse thinkfan config file
 async function parseThinkfanConfig(content: string) {
-  const lines = content.split('\n').map(line => line.trim())
-  const sensors: Array<{ type: string; path: string; name: string }> = []
-  const fans: Array<{ type: string; path: string; name: string }> = []
-  const levels: Array<{ level: number; low: number; high: number }> = []
+  // Try parsing as YAML first
+  try {
+    const yamlConfig = parseYAML(content) as ThinkfanConfig;
+    if (yamlConfig && typeof yamlConfig === 'object') {
+      // Transform YAML format to our internal format
+      return {
+        sensors: (yamlConfig.sensors || []).map((sensor: { hwmon?: string; tpacpi?: string }) => ({
+          type: sensor.hwmon ? 'hwmon' : 'tpacpi',
+          path: sensor.hwmon || sensor.tpacpi,
+          name: 'Temperature Sensor'
+        })),
+        fans: (yamlConfig.fans || []).map((fan: { tpacpi?: string; hwmon?: string }) => ({
+          type: fan.tpacpi ? 'tpacpi' : 'hwmon',
+          path: fan.tpacpi || fan.hwmon,
+          name: 'ThinkPad Fan'
+        })),
+        levels: (yamlConfig.levels || []).map((level: ThinkfanLevel) => ({
+          speed: level.speed,
+          lower_limit: level.lower_limit,
+          upper_limit: level.upper_limit
+        }))
+      };
+    }
+  } catch (e) {
+    console.log('Not a valid YAML format, trying legacy format...');
+  }
+
+  // Fall back to traditional format parsing
+  const lines = content.split('\n').map(line => line.trim());
+  const sensors: Array<{ type: string; path: string; name: string }> = [];
+  const fans: Array<{ type: string; path: string; name: string }> = [];
+  const levels: Array<{ speed: number; lower_limit?: number[]; upper_limit: number[] }> = [];
 
   for (const line of lines) {
-    // Skip comments and empty lines
-    if (line.startsWith('#') || line === '') continue
+    if (line.startsWith('#') || line === '') continue;
 
     if (line.startsWith('hwmon')) {
-      const [type, path] = line.split(/\s+/).filter(Boolean)
-      sensors.push({
-        type,
-        path,
-        name: 'CPU Temperature'
-      })
+      const [type, path] = line.split(/\s+/).filter(Boolean);
+      sensors.push({ type, path, name: 'Temperature Sensor' });
     } else if (line.startsWith('tp_fan')) {
-      const [type, path] = line.split(/\s+/).filter(Boolean)
-      fans.push({
-        type,
-        path,
-        name: 'ThinkPad Fan'
-      })
+      const [type, path] = line.split(/\s+/).filter(Boolean);
+      fans.push({ type, path, name: 'ThinkPad Fan' });
     } else if (line.startsWith('(') && line.endsWith(')')) {
-      // Parse fan levels in format (level, low, high)
-      const values = line.replace(/[()]/g, '').split(',').map(v => parseInt(v.trim()))
+      const values = line.replace(/[()]/g, '').split(',').map(v => parseInt(v.trim()));
       if (values.length === 3) {
         levels.push({
-          level: values[0],
-          low: values[1],
-          high: values[2]
-        })
+          speed: values[0],
+          lower_limit: values.length > 1 ? [values[1]] : undefined,
+          upper_limit: [values[2]]
+        });
       }
     }
   }
 
-  return { sensors, fans, levels }
+  return { sensors, fans, levels };
 }
 
 // Register IPC handler before creating the window
 ipcMain.handle('read-thinkfan-config', async () => {
   try {
-    const configContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8')
-    const parsedConfig = await parseThinkfanConfig(configContent)
-    console.log('Parsed config:', parsedConfig) // Add this for debugging
-    return parsedConfig
+    const { content, format } = await readThinkfanConfig();
+    const parsedConfig = await parseThinkfanConfig(content);
+    return { ...parsedConfig, format };
   } catch (error) {
-    console.error('Error reading thinkfan config:', error)
-    throw error
+    console.error('Error reading thinkfan config:', error);
+    throw error;
   }
 });
 
-ipcMain.handle('update-thinkfan-level', async (_event, { index, level }: { index: number, level: { level: number, low: number, high: number } }) => {
+ipcMain.handle('update-thinkfan-level', async (_event, { index, level }: { 
+  index: number, 
+  level: { 
+    level: number; 
+    speed: number;
+    low: number; 
+    high: number; 
+  } 
+}) => {
   try {
-    // Read current config
-    const configContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8');
-    const lines = configContent.split('\n');
+    const { content, format } = await readThinkfanConfig();
     
-    // Find and update the level line
-    let levelCount = 0;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.startsWith('(') && line.endsWith(')')) {
-        if (levelCount === index) {
-          lines[i] = `(${level.level}, ${level.low}, ${level.high})`;
-          break;
+    let newConfig;
+    if (format === 'yaml') {
+      const parsedConfig = await parseThinkfanConfig(content);
+      const levels = [...parsedConfig.levels];
+      levels[index] = {
+        speed: level.level,
+        lower_limit: [level.low],
+        upper_limit: [level.high]
+      } as ThinkfanLevel;
+      
+      newConfig = {
+        sensors: parsedConfig.sensors.map(sensor => ({
+          [sensor.type]: sensor.path
+        })),
+        fans: parsedConfig.fans.map(fan => ({
+          [fan.type]: fan.path
+        })),
+        levels
+      };
+      newConfig = stringifyYAML(newConfig);
+    } else {
+      const lines = content.split('\n');
+      let levelCount = 0;
+      for (let i = 0; i < lines.length; i++) {
+        if (lines[i].startsWith('(') && lines[i].endsWith(')')) {
+          if (levelCount === index) {
+            lines[i] = `(${level.level}, ${level.low}, ${level.high})`;
+            break;
+          }
+          levelCount++;
         }
-        levelCount++;
       }
+      newConfig = lines.join('\n');
     }
 
-    const newConfig = lines.join('\n');
-    const tempFile = '/tmp/thinkfan.conf.tmp';
+    const configPath = format === 'yaml' ? '/etc/thinkfan.yaml' : '/etc/thinkfan.conf';
+    const tempFile = '/tmp/thinkfan.tmp';
     await fs.writeFile(tempFile, newConfig, 'utf-8');
-    
-    await execAsync(`pkexec sh -c 'cat ${tempFile} > /etc/thinkfan.conf && systemctl restart thinkfan'`);
+    await execAsync(`pkexec sh -c 'cat ${tempFile} > ${configPath} && systemctl restart thinkfan'`);
     await fs.unlink(tempFile);
     
     return await parseThinkfanConfig(newConfig);
@@ -98,29 +144,34 @@ ipcMain.handle('update-thinkfan-level', async (_event, { index, level }: { index
   }
 });
 
-ipcMain.handle('update-thinkfan-config', async (_event, levels) => {
+ipcMain.handle('update-thinkfan-config', async (_event, levels: ThinkfanLevel[]) => {
   try {
-    const configContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8');
-    const lines = configContent.split('\n');
-    let levelIndex = 0;
+    const { content, format } = await readThinkfanConfig();
+    const parsedConfig = await parseThinkfanConfig(content);
     
-    const newLines = lines.map(line => {
-      if (line.startsWith('(') && line.endsWith(')')) {
-        const level = levels[levelIndex];
-        levelIndex++;
-        return `(${level.level}, ${level.low}, ${level.high})`;
-      }
-      return line;
-    });
-
-    const newConfig = newLines.join('\n');
-    const tempFile = '/tmp/thinkfan.conf.tmp';
-    await fs.writeFile(tempFile, newConfig, 'utf-8');
+    let newConfig;
+    if (format === 'yaml') {
+      // Create raw YAML string to ensure correct formatting
+      newConfig = [
+        'sensors:',
+        `  - hwmon: ${parsedConfig.sensors[0].path}`,
+        '',
+        'fans:',
+        '  - tpacpi: /proc/acpi/ibm/fan',
+        '',
+        'levels:',
+        ...levels.map(level => [
+          '  - speed: ' + level.speed,
+          ...(level.lower_limit ? [`    lower_limit: [${level.lower_limit[0]}]`] : []),
+          `    upper_limit: [${level.upper_limit[0]}]`
+        ]).flat()
+      ].join('\n');
+    }
     
-    await execAsync(`pkexec sh -c 'cat ${tempFile} > /etc/thinkfan.conf && systemctl restart thinkfan'`);
-    await fs.unlink(tempFile);
-    
-    return await parseThinkfanConfig(newConfig);
+    if (!newConfig) {
+      throw new Error('Failed to generate config');
+    }
+    return await updateThinkfanConfig(newConfig, format);
   } catch (error) {
     console.error('Error updating thinkfan config:', error);
     throw error;
@@ -144,7 +195,7 @@ async function getSensorPaths() {
       .split('\n')
       .filter(Boolean);
 
-    console.log('Found sensor paths:', allPaths); // Debug log
+    //console.log('Found sensor paths:', allPaths); // Debug log
 
     return allPaths;
   } catch (error) {
@@ -240,38 +291,41 @@ async function findActualSensorPath(sensorPath: string): Promise<string> {
 }
 
 // Modify the update-thinkfan-sensor handler
-ipcMain.handle('update-thinkfan-sensor', async (_event, sensorPattern: string) => {
+ipcMain.handle('update-thinkfan-sensor', async (_event, sensorPath: string) => {
   try {
-    const actualPath = await findActualSensorPath(sensorPattern);
-    if (!actualPath) {
-      throw new Error('Sensor path not found');
-    }
-
-    const configContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8');
-    const lines = configContent.split('\n');
+    const { content, format } = await readThinkfanConfig();
+    const parsedConfig = await parseThinkfanConfig(content);
     
-    const hwmonIndex = lines.findIndex(line => line.trim().startsWith('hwmon'));
-    const newLine = `hwmon ${actualPath}`;
-    
-    if (hwmonIndex !== -1) {
-      lines[hwmonIndex] = newLine;
+    let newConfig;
+    if (format === 'yaml') {
+      // Create new YAML config with updated sensor
+      newConfig = {
+        sensors: [{ hwmon: sensorPath }],
+        fans: parsedConfig.fans.map(fan => ({
+          [fan.type]: fan.path
+        })),
+        levels: parsedConfig.levels
+      };
+      newConfig = stringifyYAML(newConfig);
     } else {
-      // Add after any comments at the start
-      let insertIndex = 0;
-      while (insertIndex < lines.length && (lines[insertIndex].startsWith('#') || lines[insertIndex].trim() === '')) {
-        insertIndex++;
+      // Legacy format handling
+      const lines = content.split('\n');
+      const hwmonIndex = lines.findIndex(line => line.trim().startsWith('hwmon'));
+      const newLine = `hwmon ${sensorPath}`;
+      
+      if (hwmonIndex !== -1) {
+        lines[hwmonIndex] = newLine;
+      } else {
+        let insertIndex = 0;
+        while (insertIndex < lines.length && (lines[insertIndex].startsWith('#') || lines[insertIndex].trim() === '')) {
+          insertIndex++;
+        }
+        lines.splice(insertIndex, 0, newLine);
       }
-      lines.splice(insertIndex, 0, newLine);
+      newConfig = lines.join('\n');
     }
 
-    const newConfig = lines.join('\n');
-    const tempFile = '/tmp/thinkfan.conf.tmp';
-    await fs.writeFile(tempFile, newConfig, 'utf-8');
-    
-    await execAsync(`pkexec sh -c 'cat ${tempFile} > /etc/thinkfan.conf && systemctl restart thinkfan'`);
-    await fs.unlink(tempFile);
-    
-    return await parseThinkfanConfig(newConfig);
+    return await updateThinkfanConfig(newConfig, format);
   } catch (error) {
     console.error('Error updating thinkfan sensor:', error);
     throw error;
@@ -323,3 +377,76 @@ app.on('activate', () => {
     createWindow()
   }
 })
+
+async function readThinkfanConfig(): Promise<{ content: string; format: 'yaml' | 'conf' }> {
+  try {
+    // Try reading YAML config first
+    try {
+      const yamlContent = await fs.readFile('/etc/thinkfan.yaml', 'utf-8');
+      return { content: yamlContent, format: 'yaml' };
+    } catch (yamlError) {
+      // Try reading traditional config
+      try {
+        const confContent = await fs.readFile('/etc/thinkfan.conf', 'utf-8');
+        return { content: confContent, format: 'conf' };
+      } catch (confError) {
+        // Create default YAML config if neither exists
+        const defaultConfig = {
+          sensors: [
+            { hwmon: '/sys/devices/virtual/thermal/thermal_zone0/hwmon1/temp1_input' }
+          ],
+          fans: [
+            { tpacpi: '/proc/acpi/ibm/fan' }
+          ],
+          levels: [
+            { speed: 0, upper_limit: [60] },
+            { speed: 1, lower_limit: [60], upper_limit: [70] },
+            { speed: 2, lower_limit: [70], upper_limit: [80] },
+            { speed: 3, lower_limit: [80], upper_limit: [90] },
+            { speed: 7, lower_limit: [90], upper_limit: [32767] }
+          ]
+        };
+        const yamlContent = stringifyYAML(defaultConfig);
+        const tempFile = '/tmp/thinkfan.yaml.tmp';
+        await fs.writeFile(tempFile, yamlContent, 'utf-8');
+        await execAsync(`pkexec sh -c 'mkdir -p /etc && cat ${tempFile} > /etc/thinkfan.yaml'`);
+        await fs.unlink(tempFile);
+        return { content: yamlContent, format: 'yaml' };
+      }
+    }
+  } catch (error) {
+    console.error('Error reading thinkfan config:', error);
+    throw error;
+  }
+}
+
+async function updateThinkfanConfig(newConfig: string, format: 'yaml' | 'conf') {
+  const tempFile = `/tmp/thinkfan.${format}`;
+  const configPath = format === 'yaml' ? '/etc/thinkfan.yaml' : '/etc/thinkfan.conf';
+  
+  try {
+    console.log('Writing config to:', tempFile);
+    await fs.writeFile(tempFile, newConfig, 'utf-8');
+    
+    // Verify written content
+    const writtenContent = await fs.readFile(tempFile, 'utf-8');
+    console.log('Written content:', writtenContent);
+    
+    // If we get here, try with pkexec
+    try {
+      await execAsync(`pkexec sh -c 'cat ${tempFile} > ${configPath} && systemctl restart thinkfan'`);
+      console.log('Config updated and service restarted');
+    } catch (error: any) {
+      console.error('Failed to update config:', error);
+      throw error;
+    }
+    
+    return await parseThinkfanConfig(newConfig);
+  } finally {
+    try {
+      await fs.unlink(tempFile);
+    } catch (e) {
+      console.error('Failed to clean up temp file:', e);
+    }
+  }
+}

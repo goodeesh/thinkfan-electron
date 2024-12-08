@@ -6,24 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 const electron = window.require('electron')
 const { ipcRenderer } = electron
-
-interface Sensor {
-  type: string;
-  path: string;
-  name: string;
-}
-
-interface Fan {
-  type: string;
-  path: string;
-  name: string;
-}
-
-interface Level {
-  level: number;
-  low: number;
-  high: number;
-}
+import type { ThinkfanConfig, ThinkfanLevel } from '../types/thinkfan';
 
 interface AvailableSensor {
   adapter: string;
@@ -34,17 +17,13 @@ interface AvailableSensor {
 }
 
 const ThinkfanConfig = () => {
-  const [configData, setConfigData] = useState<{
-    sensors: Sensor[];
-    fans: Fan[];
-    levels: Level[];
-  }>({
+  const [configData, setConfigData] = useState<ThinkfanConfig>({
     sensors: [],
     fans: [],
     levels: []
   });
 
-  const [pendingChanges, setPendingChanges] = useState<Level[]>([]);
+  const [pendingChanges, setPendingChanges] = useState<ThinkfanLevel[]>([]);
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [availableSensors, setAvailableSensors] = useState<AvailableSensor[]>([]);
@@ -58,14 +37,26 @@ const ThinkfanConfig = () => {
   const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, value: number) => {
     const newLevels = [...pendingChanges];
     if (isHigh) {
-      newLevels[index] = { ...newLevels[index], high: value };
+      newLevels[index] = { 
+        ...newLevels[index], 
+        upper_limit: [value]
+      };
       if (index < newLevels.length - 1) {
-        newLevels[index + 1] = { ...newLevels[index + 1], low: value };
+        newLevels[index + 1] = { 
+          ...newLevels[index + 1], 
+          lower_limit: [value]
+        };
       }
     } else {
-      newLevels[index] = { ...newLevels[index], low: value };
+      newLevels[index] = { 
+        ...newLevels[index], 
+        lower_limit: [value]
+      };
       if (index > 0) {
-        newLevels[index - 1] = { ...newLevels[index - 1], high: value };
+        newLevels[index - 1] = { 
+          ...newLevels[index - 1], 
+          upper_limit: [value]
+        };
       }
     }
     setPendingChanges(newLevels);
@@ -74,7 +65,9 @@ const ThinkfanConfig = () => {
   const handleApplyChanges = async () => {
     try {
       setError(null);
+      console.log('Applying changes:', pendingChanges);
       const updatedConfig = await ipcRenderer.invoke('update-thinkfan-config', pendingChanges);
+      console.log('Received updated config:', updatedConfig);
       setConfigData(updatedConfig);
       setEditingLevel(null);
     } catch (error) {
@@ -88,12 +81,14 @@ const ThinkfanConfig = () => {
     setEditingLevel(null);
   };
 
-  const handleLevelChange = (index: number, field: keyof Level, value: number) => {
+  const handleLevelChange = (index: number, field: keyof ThinkfanLevel, value: number) => {
     const newLevels = [...pendingChanges];
-    newLevels[index] = {
-      ...newLevels[index],
-      [field]: value
-    };
+    if (field === 'speed') {
+      newLevels[index] = {
+        ...newLevels[index],
+        speed: value
+      };
+    }
     setPendingChanges(newLevels);
   };
 
@@ -280,15 +275,15 @@ const ThinkfanConfig = () => {
                               <label className="text-sm font-medium">Level</label>
                               <Input
                                 type="number"
-                                value={pendingChanges[index].level}
-                                onChange={(e) => handleLevelChange(index, 'level', parseInt(e.target.value))}
+                                value={pendingChanges[index].speed}
+                                onChange={(e) => handleLevelChange(index, 'speed', parseInt(e.target.value))}
                               />
                             </div>
                             <div>
                               <label className="text-sm font-medium">Low Temperature (°C)</label>
                               <Input
                                 type="number"
-                                value={pendingChanges[index].low}
+                                value={pendingChanges[index].lower_limit?.[0] ?? 0}
                                 onChange={(e) => handleTemperatureBoundaryChange(index, false, parseInt(e.target.value))}
                               />
                             </div>
@@ -296,20 +291,21 @@ const ThinkfanConfig = () => {
                               <label className="text-sm font-medium">High Temperature (°C)</label>
                               <Input
                                 type="number"
-                                value={pendingChanges[index].high}
+                                value={pendingChanges[index].upper_limit[0]}
                                 onChange={(e) => handleTemperatureBoundaryChange(index, true, parseInt(e.target.value))}
                               />
                             </div>
                             <div className="flex gap-2">
                               <Button variant="outline" onClick={handleLevelCancel}>Cancel</Button>
+                              <Button variant="outline" onClick={handleApplyChanges} className="ml-auto">Apply Changes</Button>
                             </div>
                           </div>
                         ) : (
                           <div className="flex justify-between items-center">
                             <div>
-                              <h3 className="font-medium">Level {level.level}</h3>
+                              <h3 className="font-medium">Level {level.speed}</h3>
                               <p className="text-sm text-gray-500">
-                                {level.low}°C - {level.high}°C
+                                {level.lower_limit?.[0] ?? 0}°C - {level.upper_limit[0]}°C
                               </p>
                             </div>
                             <Button variant="outline" onClick={() => handleLevelEdit(index)}>
@@ -320,11 +316,6 @@ const ThinkfanConfig = () => {
                       </div>
                     ))}
                   </div>
-                  {pendingChanges.length > 0 && (
-                    <div className="mt-4 flex justify-end">
-                      <Button onClick={handleApplyChanges}>Apply Changes</Button>
-                    </div>
-                  )}
                 </CardContent>
               </Card>
             </TabsContent>
