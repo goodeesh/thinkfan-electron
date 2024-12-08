@@ -48,6 +48,8 @@ const ThinkfanConfig = () => {
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [availableSensors, setAvailableSensors] = useState<AvailableSensor[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [validatedSensors, setValidatedSensors] = useState<AvailableSensor[]>([]);
 
   const handleLevelEdit = (index: number) => {
     setEditingLevel(index);
@@ -107,6 +109,27 @@ const ThinkfanConfig = () => {
     }
   };
 
+  const validateSensor = async (sensor: AvailableSensor): Promise<boolean> => {
+    try {
+      const readings: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const newReading = await ipcRenderer.invoke('get-sensor-reading', sensor.path);
+        readings.push(newReading);
+        await new Promise(resolve => setTimeout(resolve, 700)); // Wait 700ms between readings
+      }
+
+      // Check if all readings are the same (stuck sensor)
+      if (readings.every(r => r === readings[0])) {
+        return false;
+      }
+
+      // Check if readings are within valid range (0-110°C)
+      return readings.every(r => r > 0 && r <= 110);
+    } catch {
+      return false;
+    }
+  };
+
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -126,17 +149,23 @@ const ThinkfanConfig = () => {
   }, [configData]);
 
   useEffect(() => {
-    const fetchSensors = async () => {
+    const fetchAndValidateSensors = async () => {
       try {
         const sensors = await ipcRenderer.invoke('get-available-sensors');
-        setAvailableSensors(sensors);
+        setValidatedSensors(sensors);
       } catch (error) {
-        console.error('Failed to fetch available sensors:', error);
+        console.error('Failed to fetch sensors:', error);
+        setError('Failed to fetch available sensors');
       }
     };
-    fetchSensors();
-    // Set up polling every 2 seconds
-    const interval = setInterval(fetchSensors, 2000);
+
+    // Initial fetch
+    fetchAndValidateSensors();
+
+    // Refresh every 2 seconds
+    const interval = setInterval(fetchAndValidateSensors, 2000);
+
+    // Cleanup
     return () => clearInterval(interval);
   }, []);
 
@@ -155,17 +184,31 @@ const ThinkfanConfig = () => {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <Tabs defaultValue="sensors">
-            <TabsList>
-              <TabsTrigger value="sensors" className="flex items-center gap-2">
+          <Tabs defaultValue="sensors" className="w-full">
+            <TabsList className="w-full justify-start border-b">
+              <TabsTrigger 
+                value="sensors" 
+                className="flex items-center gap-2 data-[state=active]:bg-primary/20 data-[state=active]:border-b-[3px] data-[state=active]:border-primary data-[state=active]:font-bold"
+              >
                 <Thermometer className="w-4 h-4" />
                 Sensors
               </TabsTrigger>
-              <TabsTrigger value="fans" className="flex items-center gap-2">
+              <TabsTrigger 
+                value="fans" 
+                className="flex items-center gap-2 data-[state=active]:bg-primary/20 data-[state=active]:border-b-[3px] data-[state=active]:border-primary data-[state=active]:font-bold"
+              >
                 <Fan className="w-4 h-4" />
                 Fans
               </TabsTrigger>
-              <TabsTrigger value="levels">Levels</TabsTrigger>
+              <TabsTrigger 
+                value="levels" 
+                className="flex items-center gap-2 data-[state=active]:bg-primary/20 data-[state=active]:border-b-[3px] data-[state=active]:border-primary data-[state=active]:font-bold"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 20h18M3 12h18M3 4h18" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                Levels
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="sensors">
@@ -176,7 +219,7 @@ const ThinkfanConfig = () => {
                       <h3 className="text-lg font-medium">Available Temperature Sensors</h3>
                       <p className="text-sm text-gray-500">Select a sensor to use for fan control</p>
                     </div>
-                    {availableSensors.map((sensor, index) => (
+                    {validatedSensors.map((sensor, index) => (
                       <div key={index} className="p-4 border rounded-lg">
                         <div className="flex justify-between items-center">
                           <div>

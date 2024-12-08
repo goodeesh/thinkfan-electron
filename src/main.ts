@@ -8,6 +8,9 @@ const execAsync = promisify(exec);
 const isDev = process.env.NODE_ENV === 'development'
 let mainWindow: BrowserWindow | null = null
 
+// Add at the top with other imports
+const sensorReadingsCache = new Map<string, { readings: number[], timestamp: number }>();
+
 // Function to parse thinkfan config file
 async function parseThinkfanConfig(content: string) {
   const lines = content.split('\n').map(line => line.trim())
@@ -141,6 +144,8 @@ async function getSensorPaths() {
       .split('\n')
       .filter(Boolean);
 
+    console.log('Found sensor paths:', allPaths); // Debug log
+
     return allPaths;
   } catch (error) {
     console.error('Error finding sensor paths:', error);
@@ -163,25 +168,31 @@ ipcMain.handle('get-available-sensors', async () => {
       for (const [sensorName, values] of Object.entries(data as object)) {
         if (typeof values === 'object' && values !== null) {
           for (const [key, value] of Object.entries(values)) {
-            if (key.includes('temp') || key.includes('Tctl') || key === 'CPU' || key === 'edge') {
+            if (key.includes('temp') && key.endsWith('_input')) {
               if (value !== null && (typeof value === 'number' || (typeof value === 'object' && 'input' in value))) {
-                // Find matching path from sensorPaths
-                const matchingPath = sensorPaths.find(path => {
-                  const normalizedPath = path.toLowerCase();
-                  const normalizedAdapter = adapter.toLowerCase().replace(/[-_]/g, '');
-                  const normalizedSensor = sensorName.toLowerCase().replace(/[-_]/g, '');
-                  return normalizedPath.includes(normalizedAdapter) || 
-                         normalizedPath.includes(normalizedSensor) ||
-                         normalizedPath.includes('thermal');
-                });
+                const current = typeof value === 'number' ? value : (value as { input: number }).input;
                 
-                availableSensors.push({
-                  adapter,
-                  name: sensorName,
-                  sensor: key,
-                  path: matchingPath || '',
-                  current: typeof value === 'number' ? value : (value as { input: number }).input
-                });
+                // Only include sensors with reasonable temperature readings
+                if (current > 0 && current < 105) {
+                  const matchingPath = sensorPaths.find(path => {
+                    const normalizedPath = path.toLowerCase();
+                    const normalizedAdapter = adapter.toLowerCase().replace(/[-_]/g, '');
+                    const normalizedSensor = sensorName.toLowerCase().replace(/[-_]/g, '');
+                    return normalizedPath.includes(normalizedAdapter) || 
+                           normalizedPath.includes(normalizedSensor) ||
+                           normalizedPath.includes('thermal');
+                  });
+
+                  if (matchingPath) {
+                    availableSensors.push({
+                      adapter,
+                      name: sensorName,
+                      sensor: key,
+                      path: matchingPath,
+                      current
+                    });
+                  }
+                }
               }
             }
           }
@@ -263,6 +274,16 @@ ipcMain.handle('update-thinkfan-sensor', async (_event, sensorPattern: string) =
     return await parseThinkfanConfig(newConfig);
   } catch (error) {
     console.error('Error updating thinkfan sensor:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('get-sensor-reading', async (_event, sensorPath: string) => {
+  try {
+    const content = await fs.readFile(sensorPath, 'utf-8');
+    return parseInt(content.trim()) / 1000; // Convert from millidegrees to degrees
+  } catch (error) {
+    console.error('Error reading sensor:', error);
     throw error;
   }
 });
