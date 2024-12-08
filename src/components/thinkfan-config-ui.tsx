@@ -252,6 +252,42 @@ const ThinkfanConfig = () => {
                       <h3 className="text-lg font-medium">Available Temperature Sensors</h3>
                       <p className="text-sm text-gray-500">Select a sensor to use for fan control</p>
                     </div>
+                    {selectedSensor && (
+                      <div className="p-4 border rounded-lg mb-4">
+                        <div className="space-y-2">
+                          <h3 className="font-medium">Current Active Sensor</h3>
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-500">Path:</span>
+                            <span className="font-mono text-sm">{selectedSensor}</span>
+                          </div>
+                          <div className="flex justify-between items-center">
+                            <span className="text-sm text-gray-500">Temperature:</span>
+                            <span className="font-medium">
+                              {sensorReadings.length > 0 
+                                ? `${sensorReadings[sensorReadings.length - 1].value.toFixed(1)}°C`
+                                : 'Loading...'}
+                            </span>
+                          </div>
+                          <div className="h-20 mt-2">
+                            {sensorReadings.length > 1 && (
+                              <div className="flex items-end justify-between h-full">
+                                {sensorReadings.map((reading) => {
+                                  const height = `${(reading.value / 100) * 100}%`;
+                                  return (
+                                    <div 
+                                      key={reading.timestamp}
+                                      className="w-4 bg-primary/60 rounded-t"
+                                      style={{ height }}
+                                      title={`${reading.value.toFixed(1)}°C`}
+                                    />
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     {validatedSensors.map((sensor, index) => (
                       <div key={index} className="p-4 border rounded-lg">
                         <div className="flex justify-between items-center">
@@ -360,46 +396,6 @@ const ThinkfanConfig = () => {
           </Tabs>
         </CardContent>
       </Card>
-      {selectedSensor && (
-        <Card className="mt-4">
-          <CardHeader>
-            <CardTitle>Current Sensor</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="font-medium">Path:</span>
-                <span className="font-mono text-sm">{selectedSensor}</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="font-medium">Current Temperature:</span>
-                <span className="text-lg font-bold">
-                  {sensorReadings.length > 0 
-                    ? `${sensorReadings[sensorReadings.length - 1].value.toFixed(1)}°C`
-                    : 'Loading...'}
-                </span>
-              </div>
-              <div className="h-20 mt-4">
-                {sensorReadings.length > 1 && (
-                  <div className="flex items-end justify-between h-full">
-                    {sensorReadings.map((reading, i) => {
-                      const height = `${(reading.value / 100) * 100}%`;
-                      return (
-                        <div 
-                          key={reading.timestamp}
-                          className="w-4 bg-primary/60 rounded-t"
-                          style={{ height }}
-                          title={`${reading.value.toFixed(1)}°C`}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 };

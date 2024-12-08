@@ -207,51 +207,15 @@ async function getSensorPaths() {
 
 // Modify get-available-sensors handler to include the actual path
 ipcMain.handle('get-available-sensors', async () => {
-  try {
-    const [sensorsOutput, sensorPaths] = await Promise.all([
-      execAsync('sensors -j'),
-      getSensorPaths()
-    ]);
-    
-    const sensorsData = JSON.parse(sensorsOutput.stdout);
-    const availableSensors = [];
-    
-    for (const [adapter, data] of Object.entries(sensorsData)) {
-      for (const [sensorName, values] of Object.entries(data as object)) {
-        if (typeof values === 'object' && values !== null) {
-          for (const [key, value] of Object.entries(values)) {
-            if (key.includes('temp') && key.endsWith('_input')) {
-              if (value !== null && (typeof value === 'number' || (typeof value === 'object' && 'input' in value))) {
-                const current = typeof value === 'number' ? value : (value as { input: number }).input;
-                
-                // Only include sensors with reasonable temperature readings
-                if (current > 0 && current < 105) {
-                  const matchingPath = await findPreferredSensorPath(adapter);
-                  if (matchingPath) {
-                    console.log(`Using preferred path for ${adapter}/${sensorName}: ${matchingPath}`);
-                    availableSensors.push({
-                      adapter,
-                      name: sensorName,
-                      sensor: key,
-                      path: matchingPath,
-                      current
-                    });
-                  } else {
-                    console.log(`No preferred path found for sensor ${adapter}/${sensorName}`);
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    return availableSensors;
-  } catch (error) {
-    console.error('Error reading sensors:', error);
-    throw error;
-  }
+  const zones = await getAllThermalZones();
+  return zones.map(zone => ({
+    adapter: zone.sensorMatch?.adapter || zone.type,
+    name: zone.sensorMatch ? `${zone.sensorMatch.name} (${zone.type})` : zone.type,
+    sensor: 'temp',
+    path: zone.path,
+    current: zone.temp,
+    type: zone.type
+  }));
 });
 
 // Add this function before the update-thinkfan-sensor handler
@@ -540,41 +504,172 @@ type ThermalZone = {
   temp: number;
 };
 
+type SensorMapping = {
+  aliases: string[];
+  priority: number;
+  matchType: 'exact' | 'contains';
+};
+
+const sensorMappings: Record<string, SensorMapping> = {
+  'k10temp': { 
+    aliases: ['k10temp', 'cpu_thermal'], 
+    priority: 100,
+    matchType: 'exact'
+  },
+  'amdgpu': { 
+    aliases: ['amdgpu'], 
+    priority: 90,
+    matchType: 'exact'
+  },
+  'thinkpad': { 
+    aliases: ['thinkpad'], 
+    priority: 80,
+    matchType: 'exact'
+  },
+  'nvme': { 
+    aliases: ['nvme'], 
+    priority: 70,
+    matchType: 'exact'
+  },
+  'iwlwifi': { 
+    aliases: ['iwlwifi'], 
+    priority: 60,
+    matchType: 'exact'
+  },
+  'acpitz': { 
+    aliases: ['acpitz'], 
+    priority: 10,
+    matchType: 'contains'
+  }
+};
+
 async function findPreferredSensorPath(adapter: string): Promise<string | null> {
   try {
-    // Get all thermal zones
     const { stdout } = await execAsync('find /sys/devices/virtual/thermal/thermal_zone* -maxdepth 0 -type d');
     const thermalZones = stdout.trim().split('\n');
     
-    const zones: ThermalZone[] = [];
+    let bestMatch: ThermalZone | null = null;
+    let highestPriority = -1;
+
     for (const zonePath of thermalZones) {
       try {
-        const [type, temp] = await Promise.all([
-          fs.readFile(`${zonePath}/type`, 'utf-8'),
-          fs.readFile(`${zonePath}/temp`, 'utf-8')
-        ]);
+        const type = await fs.readFile(`${zonePath}/type`, 'utf-8');
+        const normalizedType = type.trim().toLowerCase();
+        const normalizedAdapter = adapter.toLowerCase();
+
+        // Log the actual type for debugging
+        console.log(`Checking zone ${zonePath} with type ${normalizedType} for adapter ${normalizedAdapter}`);
         
-        zones.push({
-          path: `${zonePath}/temp`,
-          type: type.trim(),
-          temp: parseInt(temp) / 1000
-        });
-      } catch {
+        for (const [key, { aliases, priority, matchType }] of Object.entries(sensorMappings)) {
+          const matches = matchType === 'exact' 
+            ? aliases.some(alias => normalizedType === alias)
+            : aliases.some(alias => normalizedType.includes(alias));
+
+          if ((normalizedAdapter.includes(key) && matches) || matches) {
+            if (priority > highestPriority) {
+              highestPriority = priority;
+              bestMatch = { path: `${zonePath}/temp`, type: normalizedType, temp: 0 };
+            }
+          }
+        }
+      } catch (e) {
         continue;
       }
     }
 
-    // Match zone by type
-    const normalizedAdapter = adapter.toLowerCase().replace(/[-_]/g, '');
-    const matchingZone = zones.find(zone => {
-      const normalizedType = zone.type.toLowerCase();
-      return normalizedType.includes(normalizedAdapter) || 
-             normalizedAdapter.includes(normalizedType);
-    });
+    if (bestMatch) {
+      console.log(`Found best match for ${adapter}: ${bestMatch.type} (${bestMatch.path}) with priority ${highestPriority}`);
+      return bestMatch.path;
+    }
 
-    return matchingZone?.path || null;
+    return null;
   } catch (error) {
     console.debug('Error finding thermal zone:', error);
     return null;
+  }
+}
+
+type ThermalZoneInfo = {
+  path: string;
+  type: string;
+  temp: number;
+  sensorMatch?: {
+    adapter: string;
+    name: string;
+    value: number;
+  };
+};
+
+async function getAllThermalZones(): Promise<ThermalZoneInfo[]> {
+  try {
+    const { stdout: thermalPaths } = await execAsync('find /sys/devices/virtual/thermal/thermal_zone* -maxdepth 0 -type d');
+    const zones: ThermalZoneInfo[] = [];
+    const { stdout: sensorsOutput } = await execAsync('sensors -j');
+    const sensorsData = JSON.parse(sensorsOutput);
+
+    for (const zonePath of thermalPaths.trim().split('\n')) {
+      try {
+        // Read additional thermal zone information
+        const [type, temp, policy] = await Promise.all([
+          fs.readFile(`${zonePath}/type`, 'utf-8'),
+          fs.readFile(`${zonePath}/temp`, 'utf-8'),
+          fs.readFile(`${zonePath}/policy`, 'utf-8').catch(() => '')
+        ]);
+
+        const currentTemp = parseInt(temp) / 1000;
+
+        // Try to identify the true source
+        let bestMatch: ThermalZoneInfo['sensorMatch'] = undefined;
+        let bestDiff = Infinity;
+
+        for (const [adapter, data] of Object.entries(sensorsData)) {
+          for (const [sensorName, values] of Object.entries(data as object)) {
+            if (typeof values === 'object' && values !== null) {
+              for (const [key, value] of Object.entries(values)) {
+                if (key.includes('temp') || key === 'Tctl' || key === 'edge' || key === 'Composite') {
+                  const sensorTemp = typeof value === 'number' ? value : (value as { input: number }).input;
+                  const diff = Math.abs(sensorTemp - currentTemp);
+                  
+                  // Match if temperatures are very close (within 0.5°C)
+                  if (diff < 0.5 && diff < bestDiff) {
+                    bestDiff = diff;
+                    bestMatch = {
+                      adapter,
+                      name: sensorName,
+                      value: sensorTemp
+                    };
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        zones.push({
+          path: `${zonePath}/temp`,
+          type: type.trim(),
+          temp: currentTemp,
+          sensorMatch: bestMatch
+        });
+
+      } catch (e) {
+        console.debug(`Error reading zone ${zonePath}:`, e);
+      }
+    }
+
+    // Sort zones by priority (CPU first, then GPU, etc.)
+    return zones.sort((a, b) => {
+      const getTypePriority = (type: string, match?: { adapter: string }) => {
+        if (match?.adapter.includes('k10temp')) return 100;
+        if (type.includes('cpu') || match?.adapter.includes('coretemp')) return 90;
+        if (type.includes('gpu') || match?.adapter.includes('amdgpu')) return 80;
+        return 0;
+      };
+      return getTypePriority(b.type, b.sensorMatch) - getTypePriority(a.type, a.sensorMatch);
+    });
+
+  } catch (error) {
+    console.error('Error getting thermal zones:', error);
+    return [];
   }
 }
