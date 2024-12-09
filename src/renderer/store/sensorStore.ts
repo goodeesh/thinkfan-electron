@@ -19,6 +19,7 @@ interface SensorState {
   fetchSensors: () => Promise<void>;
   updateSensorReadings: () => Promise<void>;
   initializeFromConfig: (config: ThinkfanConfig) => void;
+  resetState: () => void;
 }
 
 export const useSensorStore = create<SensorState>((set, get) => ({
@@ -32,6 +33,13 @@ export const useSensorStore = create<SensorState>((set, get) => ({
   setSelectedSensor: (path) => set({ selectedSensor: path }),
   setSensorReadings: (readings) => set({ sensorReadings: readings }),
 
+  resetState: () => {
+    set({
+      sensorReadings: [],
+      selectedSensor: null
+    });
+  },
+
   initializeFromConfig: (config) => {
     if (config.sensors) {
       const activeSensors = config.sensors.map(sensor => ({
@@ -40,7 +48,8 @@ export const useSensorStore = create<SensorState>((set, get) => ({
       }));
       set(state => ({
         activeSensors,
-        selectedSensor: state.selectedSensor || (activeSensors[0]?.path ?? null)
+        selectedSensor: state.selectedSensor || (activeSensors[0]?.path ?? null),
+        sensorReadings: [] // Reset readings when config changes
       }));
     }
   },
@@ -54,21 +63,7 @@ export const useSensorStore = create<SensorState>((set, get) => ({
       }
 
       const updatedConfig = await ipcRenderer.invoke('add-thinkfan-sensor', sensorPath);
-      const temp = await ipcRenderer.invoke('get-sensor-reading', sensorPath);
-      const newSensor = get().validatedSensors.find(s => s.path === sensorPath);
-
-      if (newSensor) {
-        set(state => ({
-          activeSensors: [...state.activeSensors, {
-            path: sensorPath,
-            name: newSensor.name,
-            currentTemp: temp
-          }]
-        }));
-      }
-
-      useConfigStore.getState().setConfigData(updatedConfig);
-      useConfigStore.getState().setError(null);
+      useConfigStore.getState().resetState(updatedConfig);
     } catch (error) {
       useConfigStore.getState().setError('Failed to add sensor');
       console.error('Failed to add sensor:', error);
@@ -84,12 +79,11 @@ export const useSensorStore = create<SensorState>((set, get) => ({
       }
 
       const updatedConfig = await ipcRenderer.invoke('remove-thinkfan-sensor', sensorPath);
-      set(state => ({
-        activeSensors: state.activeSensors.filter(s => s.path !== sensorPath)
-      }));
-
-      useConfigStore.getState().setConfigData(updatedConfig);
-      useConfigStore.getState().setError(null);
+      
+      // Reset all state with new config
+      useConfigStore.getState().resetState(updatedConfig);
+      get().resetState();
+      
     } catch (error) {
       useConfigStore.getState().setError('Failed to remove sensor');
       console.error('Failed to remove sensor:', error);
