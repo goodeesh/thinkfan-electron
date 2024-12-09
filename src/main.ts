@@ -10,10 +10,6 @@ const execAsync = promisify(exec);
 const isDev = process.env.NODE_ENV === 'development'
 let mainWindow: BrowserWindow | null = null
 
-// Add at the top with other imports
-const sensorReadingsCache = new Map<string, { readings: number[], timestamp: number }>();
-const sensorPathCache = new Map<string, string>();
-
 // Function to parse thinkfan config file
 async function parseThinkfanConfig(content: string) {
   // Try parsing as YAML first
@@ -179,32 +175,6 @@ ipcMain.handle('update-thinkfan-config', async (_event, levels: ThinkfanLevel[])
   }
 });
 
-async function getSensorPaths() {
-  try {
-    // Try multiple locations for temperature sensors
-    const commands = [
-      'find /sys/class/hwmon -type f -name "temp*_input"',
-      'find /sys/devices/platform -type f -name "temp*_input"',
-      'find /sys/devices/virtual/thermal -type f -name "temp*_input"'
-    ];
-
-    const results = await Promise.all(commands.map(cmd => execAsync(cmd).catch(() => ({ stdout: '' }))));
-    const allPaths = results
-      .map(result => result.stdout.trim())
-      .filter(Boolean)
-      .join('\n')
-      .split('\n')
-      .filter(Boolean);
-
-    //console.log('Found sensor paths:', allPaths); // Debug log
-
-    return allPaths;
-  } catch (error) {
-    console.error('Error finding sensor paths:', error);
-    throw error;
-  }
-}
-
 // Modify get-available-sensors handler to include the actual path
 ipcMain.handle('get-available-sensors', async () => {
   const zones = await getAllThermalZones();
@@ -217,38 +187,6 @@ ipcMain.handle('get-available-sensors', async () => {
     type: zone.type
   }));
 });
-
-// Add this function before the update-thinkfan-sensor handler
-async function findActualSensorPath(sensorPath: string): Promise<string> {
-  try {
-    // First try the direct path
-    try {
-      await fs.access(sensorPath);
-      return sensorPath;
-    } catch {
-      // If direct path fails, try alternative paths
-      const alternatives = [
-        sensorPath,
-        `/sys/devices/platform/${sensorPath}`,
-        `/sys/devices/virtual/thermal/${sensorPath}`,
-        `/sys/class/hwmon/${sensorPath}`
-      ];
-
-      for (const path of alternatives) {
-        try {
-          await fs.access(path);
-          return path;
-        } catch {
-          continue;
-        }
-      }
-    }
-    throw new Error('Sensor path not found');
-  } catch (error) {
-    console.error('Error finding sensor path:', error);
-    throw error;
-  }
-}
 
 // Modify the update-thinkfan-sensor handler
 ipcMain.handle('update-thinkfan-sensor', async (_event, sensorPath: string) => {
@@ -411,184 +349,6 @@ async function updateThinkfanConfig(newConfig: string, format: 'yaml' | 'conf') 
   }
 }
 
-// Add this function to help find stable paths
-async function findStableSensorPath(sensorInfo: { adapter: string, name: string }): Promise<string | null> {
-  try {
-    // Try multiple methods to find the most stable path
-    const methods = [
-      // Method 1: Use symlinks to find real device
-      async () => {
-        const command = `find /sys/devices -type l -name "hwmon*" -ls | grep "${sensorInfo.adapter.toLowerCase()}"`;
-        const { stdout } = await execAsync(command);
-        if (stdout) {
-          const realPath = await fs.readlink(stdout.trim().split(' ').pop() || '');
-          return realPath;
-        }
-        return null;
-      },
-      // Method 2: Search by device name in a stable path
-      async () => {
-        const command = `find /sys/class/hwmon -type f -name "name" -exec sh -c 'echo "{} $(cat {})"' \\; | grep -i "${sensorInfo.adapter}"`;
-        const { stdout } = await execAsync(command);
-        if (stdout) {
-          return path.dirname(stdout.split(' ')[0]);
-        }
-        return null;
-      },
-      // Method 3: Use device tree path if available
-      async () => {
-        const command = `find /sys/devices/platform -name "temp*_input" | grep -i "${sensorInfo.adapter}"`;
-        const { stdout } = await execAsync(command);
-        return stdout.trim() || null;
-      }
-    ];
-
-    for (const method of methods) {
-      try {
-        const result = await method();
-        if (result) return result;
-      } catch (e) {
-        console.debug('Path finding method failed:', e);
-      }
-    }
-
-    return null;
-  } catch (error) {
-    console.error('Error finding stable sensor path:', error);
-    return null;
-  }
-}
-
-// Example of more stable paths to try
-const stablePaths = [
-  '/sys/devices/platform/thinkpad_hwmon/hwmon/*/temp*_input',
-  '/sys/devices/virtual/thermal/thermal_zone*/temp',
-  '/sys/class/hwmon/hwmon*/temp*_input'
-];
-
-// Add this helper function
-async function resolveRealSensorPath(basePath: string): Promise<string> {
-  try {
-    const realPath = await fs.realpath(basePath);
-    return realPath;
-  } catch (error) {
-    console.error('Error resolving real path:', error);
-    return basePath;
-  }
-}
-
-// Add this function to manage the cache
-async function getCachedSensorPath(sensorInfo: { adapter: string, name: string }): Promise<string | null> {
-  const cacheKey = `${sensorInfo.adapter}-${sensorInfo.name}`;
-  
-  if (sensorPathCache.has(cacheKey)) {
-    // Verify the cached path still exists
-    try {
-      await fs.access(sensorPathCache.get(cacheKey)!);
-      return sensorPathCache.get(cacheKey)!;
-    } catch {
-      sensorPathCache.delete(cacheKey);
-    }
-  }
-
-  const stablePath = await findStableSensorPath(sensorInfo);
-  if (stablePath) {
-    sensorPathCache.set(cacheKey, stablePath);
-  }
-  return stablePath;
-}
-
-type ThermalZone = {
-  path: string;
-  type: string;
-  temp: number;
-};
-
-type SensorMapping = {
-  aliases: string[];
-  priority: number;
-  matchType: 'exact' | 'contains';
-};
-
-const sensorMappings: Record<string, SensorMapping> = {
-  'k10temp': { 
-    aliases: ['k10temp', 'cpu_thermal'], 
-    priority: 100,
-    matchType: 'exact'
-  },
-  'amdgpu': { 
-    aliases: ['amdgpu'], 
-    priority: 90,
-    matchType: 'exact'
-  },
-  'thinkpad': { 
-    aliases: ['thinkpad'], 
-    priority: 80,
-    matchType: 'exact'
-  },
-  'nvme': { 
-    aliases: ['nvme'], 
-    priority: 70,
-    matchType: 'exact'
-  },
-  'iwlwifi': { 
-    aliases: ['iwlwifi'], 
-    priority: 60,
-    matchType: 'exact'
-  },
-  'acpitz': { 
-    aliases: ['acpitz'], 
-    priority: 10,
-    matchType: 'contains'
-  }
-};
-
-async function findPreferredSensorPath(adapter: string): Promise<string | null> {
-  try {
-    const { stdout } = await execAsync('find /sys/devices/virtual/thermal/thermal_zone* -maxdepth 0 -type d');
-    const thermalZones = stdout.trim().split('\n');
-    
-    let bestMatch: ThermalZone | null = null;
-    let highestPriority = -1;
-
-    for (const zonePath of thermalZones) {
-      try {
-        const type = await fs.readFile(`${zonePath}/type`, 'utf-8');
-        const normalizedType = type.trim().toLowerCase();
-        const normalizedAdapter = adapter.toLowerCase();
-
-        // Log the actual type for debugging
-        console.log(`Checking zone ${zonePath} with type ${normalizedType} for adapter ${normalizedAdapter}`);
-        
-        for (const [key, { aliases, priority, matchType }] of Object.entries(sensorMappings)) {
-          const matches = matchType === 'exact' 
-            ? aliases.some(alias => normalizedType === alias)
-            : aliases.some(alias => normalizedType.includes(alias));
-
-          if ((normalizedAdapter.includes(key) && matches) || matches) {
-            if (priority > highestPriority) {
-              highestPriority = priority;
-              bestMatch = { path: `${zonePath}/temp`, type: normalizedType, temp: 0 };
-            }
-          }
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-
-    if (bestMatch) {
-      console.log(`Found best match for ${adapter}: ${bestMatch.type} (${bestMatch.path}) with priority ${highestPriority}`);
-      return bestMatch.path;
-    }
-
-    return null;
-  } catch (error) {
-    console.debug('Error finding thermal zone:', error);
-    return null;
-  }
-}
-
 type ThermalZoneInfo = {
   path: string;
   type: string;
@@ -610,10 +370,9 @@ async function getAllThermalZones(): Promise<ThermalZoneInfo[]> {
     for (const zonePath of thermalPaths.trim().split('\n')) {
       try {
         // Read additional thermal zone information
-        const [type, temp, policy] = await Promise.all([
+        const [type, temp] = await Promise.all([
           fs.readFile(`${zonePath}/type`, 'utf-8'),
-          fs.readFile(`${zonePath}/temp`, 'utf-8'),
-          fs.readFile(`${zonePath}/policy`, 'utf-8').catch(() => '')
+          fs.readFile(`${zonePath}/temp`, 'utf-8')
         ]);
 
         const currentTemp = parseInt(temp) / 1000;

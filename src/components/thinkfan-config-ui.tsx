@@ -31,8 +31,6 @@ const ThinkfanConfig = () => {
   const [pendingChanges, setPendingChanges] = useState<ThinkfanLevel[]>([]);
   const [editingLevel, setEditingLevel] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [availableSensors, setAvailableSensors] = useState<AvailableSensor[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
   const [validatedSensors, setValidatedSensors] = useState<AvailableSensor[]>([]);
   const [selectedSensor, setSelectedSensor] = useState<string | null>(null);
   const [sensorReadings, setSensorReadings] = useState<SensorReading[]>([]);
@@ -43,7 +41,20 @@ const ThinkfanConfig = () => {
 
   const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, value: number) => {
     const newLevels = [...pendingChanges];
+    
+    // Validate input value
+    if (value < 0) {
+      setError('Temperature values must be positive');
+      return;
+    }
+
     if (isHigh) {
+      // Check if new upper limit is less than current lower limit
+      if (newLevels[index].lower_limit && value < newLevels[index].lower_limit[0]) {
+        setError('Upper limit cannot be lower than lower limit');
+        return;
+      }
+      
       newLevels[index] = { 
         ...newLevels[index], 
         upper_limit: [value]
@@ -55,6 +66,12 @@ const ThinkfanConfig = () => {
         };
       }
     } else {
+      // Check if new lower limit is higher than current upper limit
+      if (value > newLevels[index].upper_limit[0]) {
+        setError('Lower limit cannot be higher than upper limit');
+        return;
+      }
+      
       newLevels[index] = { 
         ...newLevels[index], 
         lower_limit: [value]
@@ -66,6 +83,8 @@ const ThinkfanConfig = () => {
         };
       }
     }
+    
+    setError(null);  // Clear any previous errors
     setPendingChanges(newLevels);
   };
 
@@ -112,26 +131,6 @@ const ThinkfanConfig = () => {
     }
   };
 
-  const validateSensor = async (sensor: AvailableSensor): Promise<boolean> => {
-    try {
-      const readings: number[] = [];
-      for (let i = 0; i < 3; i++) {
-        const newReading = await ipcRenderer.invoke('get-sensor-reading', sensor.path);
-        readings.push(newReading);
-        await new Promise(resolve => setTimeout(resolve, 700)); // Wait 700ms between readings
-      }
-
-      // Check if all readings are the same (stuck sensor)
-      if (readings.every(r => r === readings[0])) {
-        return false;
-      }
-
-      // Check if readings are within valid range (0-110°C)
-      return readings.every(r => r > 0 && r <= 110);
-    } catch {
-      return false;
-    }
-  };
 
   useEffect(() => {
     const fetchConfig = async () => {
