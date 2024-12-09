@@ -164,6 +164,18 @@ const ThinkfanConfig = () => {
     }
   };
 
+  const handleSensorRemove = async (sensorPath: string) => {
+    try {
+      setError(null);
+      const updatedConfig = await ipcRenderer.invoke('remove-thinkfan-sensor', sensorPath);
+      setConfigData(updatedConfig);
+      setActiveSensors(prev => prev.filter(s => s.path !== sensorPath));
+    } catch (error) {
+      console.error('Failed to remove sensor:', error);
+      setError('Failed to remove sensor from configuration. Make sure you have the necessary permissions.');
+    }
+  };
+
   const updateSensorTemperatures = async () => {
     const updatedSensors = await Promise.all(
       activeSensors.map(async (sensor) => {
@@ -350,28 +362,42 @@ const ThinkfanConfig = () => {
                         </div>
                       </div>
                     )}
-                    {validatedSensors.map((sensor, index) => (
-                      <div key={index} className="p-4 border rounded-lg">
-                        <div className="flex justify-between items-center">
-                          <div>
-                            <h3 className="font-medium">{sensor.name} - {sensor.sensor}</h3>
-                            <p className="text-sm text-gray-500">{sensor.adapter}</p>
-                            <p className="text-xs text-gray-400">{sensor.path || 'No path available'}</p>
-                          </div>
-                          <div className="flex items-center gap-4">
-                            <span className="text-sm font-medium">{sensor.current.toFixed(1)}°C</span>
-                            <Button
-                              variant="outline"
-                              onClick={() => sensor.path && handleSensorSelect(sensor.path)}
-                              disabled={!sensor.path}
-                              className={!sensor.path ? 'opacity-50 cursor-not-allowed' : ''}
-                            >
-                              {sensor.path ? 'Use This Sensor' : 'No Path Available'}
-                            </Button>
+                    {validatedSensors.map((sensor, index) => {
+                      const isActive = activeSensors.some(s => s.path === sensor.path);
+                      return (
+                        <div key={index} className="p-4 border rounded-lg">
+                          <div className="flex justify-between items-center">
+                            <div>
+                              <h3 className="font-medium">{sensor.name} - {sensor.sensor}</h3>
+                              <p className="text-sm text-gray-500">{sensor.adapter}</p>
+                              <p className="text-xs text-gray-400">{sensor.path || 'No path available'}</p>
+                            </div>
+                            <div className="flex items-center gap-4">
+                              <span className="text-sm font-medium">{sensor.current.toFixed(1)}°C</span>
+                              {isActive ? (
+                                <Button
+                                  variant="outline"
+                                  onClick={() => sensor.path && handleSensorRemove(sensor.path)}
+                                  disabled={!sensor.path}
+                                  className={!sensor.path ? 'opacity-50 cursor-not-allowed' : ''}
+                                >
+                                  Remove Sensor
+                                </Button>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  onClick={() => sensor.path && handleSensorSelect(sensor.path)}
+                                  disabled={!sensor.path}
+                                  className={!sensor.path ? 'opacity-50 cursor-not-allowed' : ''}
+                                >
+                                  {sensor.path ? 'Use This Sensor' : 'No Path Available'}
+                                </Button>
+                              )}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </CardContent>
               </Card>

@@ -270,6 +270,62 @@ ipcMain.handle('add-thinkfan-sensor', async (_event, sensorPath: string) => {
   }
 });
 
+ipcMain.handle('remove-thinkfan-sensor', async (_event, sensorPath: string) => {
+  try {
+    const { content, format } = await readThinkfanConfig();
+    const parsedConfig = await parseThinkfanConfig(content);
+    
+    // Find the index of the sensor to remove
+    const sensorIndex = parsedConfig.sensors.findIndex(
+      s => (s.hwmon || s.tpacpi || s.path) === sensorPath
+    );
+    
+    if (sensorIndex === -1) {
+      throw new Error('Sensor not found in config');
+    }
+
+    // Remove the sensor
+    parsedConfig.sensors.splice(sensorIndex, 1);
+    
+    // Update all levels to remove the temperature values for this sensor
+    parsedConfig.levels = parsedConfig.levels.map(level => ({
+      ...level,
+      lower_limit: level.lower_limit?.filter((_, i) => i !== sensorIndex),
+      upper_limit: level.upper_limit.filter((_, i) => i !== sensorIndex)
+    }));
+
+    let newConfig;
+    if (format === 'yaml') {
+      newConfig = [
+        'sensors:',
+        ...parsedConfig.sensors.map(sensor => 
+          `  - hwmon: ${sensor.hwmon || sensor.tpacpi || sensor.path}`
+        ),
+        '',
+        'fans:',
+        '  - tpacpi: /proc/acpi/ibm/fan',
+        '',
+        'levels:',
+        ...parsedConfig.levels.map(level => [
+          '  - speed: ' + level.speed,
+          ...(level.lower_limit?.length ? [`    lower_limit: [${level.lower_limit.join(', ')}]`] : []),
+          `    upper_limit: [${level.upper_limit.join(', ')}]`
+        ]).flat()
+      ].join('\n');
+    }
+    
+    if (!newConfig) {
+      throw new Error('Failed to generate config');
+    }
+
+    const updatedConfig = await updateThinkfanConfig(newConfig, format);
+    return updatedConfig;
+  } catch (error) {
+    console.error('Error removing sensor from thinkfan config:', error);
+    throw error;
+  }
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 800,
