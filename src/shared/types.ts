@@ -22,6 +22,7 @@ export interface ThinkfanConfig {
   sensors: ThinkfanSensor[];
   fans: ThinkfanFan[];
   levels: ThinkfanLevel[];
+  format?: 'yaml' | 'legacy';
 }
 
 export interface AvailableSensor {
@@ -30,6 +31,7 @@ export interface AvailableSensor {
   sensor: string;
   path: string;
   current: number;
+  type?: string;
 }
 
 export interface SensorReading {
