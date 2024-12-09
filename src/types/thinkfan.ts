@@ -8,6 +8,8 @@ export interface ThinkfanConfig {
   sensors: {
     hwmon?: string;
     tpacpi?: string;
+    path?: string;
+    name?: string;
   }[];
   fans: {
     tpacpi?: string;

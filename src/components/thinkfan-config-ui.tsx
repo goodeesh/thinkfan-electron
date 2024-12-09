@@ -21,6 +21,12 @@ interface SensorReading {
   value: number;
 }
 
+interface ActiveSensor {
+  path: string;
+  name: string;
+  currentTemp?: number;
+}
+
 const ThinkfanConfig = () => {
   const [configData, setConfigData] = useState<ThinkfanConfig>({
     sensors: [],
@@ -34,12 +40,13 @@ const ThinkfanConfig = () => {
   const [validatedSensors, setValidatedSensors] = useState<AvailableSensor[]>([]);
   const [selectedSensor, setSelectedSensor] = useState<string | null>(null);
   const [sensorReadings, setSensorReadings] = useState<SensorReading[]>([]);
+  const [activeSensors, setActiveSensors] = useState<ActiveSensor[]>([]);
 
   const handleLevelEdit = (index: number) => {
     setEditingLevel(index);
   };
 
-  const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, value: number) => {
+  const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, sensorIndex: number, value: number) => {
     const newLevels = [...pendingChanges];
     
     // Validate input value
@@ -49,42 +56,54 @@ const ThinkfanConfig = () => {
     }
 
     if (isHigh) {
+      const currentLimits = [...(newLevels[index].upper_limit || [])];
+      currentLimits[sensorIndex] = value;
+      
       // Check if new upper limit is less than current lower limit
-      if (newLevels[index].lower_limit && value < newLevels[index].lower_limit[0]) {
+      if (newLevels[index].lower_limit && value < newLevels[index].lower_limit[sensorIndex]) {
         setError('Upper limit cannot be lower than lower limit');
         return;
       }
       
       newLevels[index] = { 
         ...newLevels[index], 
-        upper_limit: [value]
+        upper_limit: currentLimits
       };
+
       if (index < newLevels.length - 1) {
+        const nextLowerLimits = [...(newLevels[index + 1].lower_limit || [])];
+        nextLowerLimits[sensorIndex] = value;
         newLevels[index + 1] = { 
           ...newLevels[index + 1], 
-          lower_limit: [value]
+          lower_limit: nextLowerLimits
         };
       }
     } else {
+      const currentLimits = [...(newLevels[index].lower_limit || [])];
+      currentLimits[sensorIndex] = value;
+      
       // Check if new lower limit is higher than current upper limit
-      if (value > newLevels[index].upper_limit[0]) {
+      if (value > newLevels[index].upper_limit[sensorIndex]) {
         setError('Lower limit cannot be higher than upper limit');
         return;
       }
       
       newLevels[index] = { 
         ...newLevels[index], 
-        lower_limit: [value]
+        lower_limit: currentLimits
       };
+
       if (index > 0) {
+        const prevUpperLimits = [...(newLevels[index - 1].upper_limit || [])];
+        prevUpperLimits[sensorIndex] = value;
         newLevels[index - 1] = { 
           ...newLevels[index - 1], 
-          upper_limit: [value]
+          upper_limit: prevUpperLimits
         };
       }
     }
     
-    setError(null);  // Clear any previous errors
+    setError(null);
     setPendingChanges(newLevels);
   };
 
@@ -119,11 +138,25 @@ const ThinkfanConfig = () => {
   };
 
   const handleSensorSelect = async (sensorPath: string) => {
-    setSelectedSensor(sensorPath);
+    const isAlreadySelected = activeSensors.some(s => s.path === sensorPath);
+    if (isAlreadySelected) {
+      setError('This sensor is already selected');
+      return;
+    }
+
     try {
       setError(null);
-      console.log('Selecting sensor:', sensorPath);
-      const updatedConfig = await ipcRenderer.invoke('update-thinkfan-sensor', sensorPath);
+      const newSensor = validatedSensors.find(s => s.path === sensorPath);
+      if (newSensor) {
+        const temp = await ipcRenderer.invoke('get-sensor-reading', sensorPath);
+        const sensorWithTemp = {
+          path: sensorPath,
+          name: newSensor.name,
+          currentTemp: temp
+        };
+        setActiveSensors(prev => [...prev, sensorWithTemp]);
+      }
+      const updatedConfig = await ipcRenderer.invoke('add-thinkfan-sensor', sensorPath);
       setConfigData(updatedConfig);
     } catch (error) {
       console.error('Failed to update sensor:', error);
@@ -131,6 +164,23 @@ const ThinkfanConfig = () => {
     }
   };
 
+  const updateSensorTemperatures = async () => {
+    const updatedSensors = await Promise.all(
+      activeSensors.map(async (sensor) => {
+        try {
+          const temp = await ipcRenderer.invoke('get-sensor-reading', sensor.path);
+          return {
+            ...sensor,
+            currentTemp: temp
+          };
+        } catch (error) {
+          console.error(`Error reading sensor ${sensor.path}:`, error);
+          return sensor;
+        }
+      })
+    );
+    setActiveSensors(updatedSensors);
+  };
 
   useEffect(() => {
     const fetchConfig = async () => {
@@ -139,6 +189,13 @@ const ThinkfanConfig = () => {
         setConfigData(data);
         if (data.sensors && data.sensors[0]?.path) {
           setSelectedSensor(data.sensors[0].path);
+        }
+        if (data.sensors) {
+          const sensors = data.sensors.map((sensor: any) => ({
+            path: sensor.hwmon || sensor.tpacpi,
+            name: sensor.name || 'Temperature Sensor'
+          }));
+          setActiveSensors(sensors);
         }
       } catch (error) {
         console.error('Failed to fetch thinkfan config:', error);
@@ -200,6 +257,12 @@ const ThinkfanConfig = () => {
     
     return () => clearInterval(interval);
   }, [selectedSensor]);
+
+  useEffect(() => {
+    updateSensorTemperatures();
+    const interval = setInterval(updateSensorTemperatures, 2000);
+    return () => clearInterval(interval);
+  }, [activeSensors.length]);
 
   return (
     <div className="w-full max-w-4xl mx-auto p-4">
@@ -322,11 +385,15 @@ const ThinkfanConfig = () => {
                       <div key={index} className="p-4 border rounded-lg">
                         <div className="flex justify-between items-center">
                           <div>
-                            <h3 className="font-medium">{fan.name}</h3>
-                            <p className="text-sm text-gray-500">{fan.path}</p>
+                            <h3 className="font-medium">Fan {index + 1}</h3>
+                            <p className="text-sm text-gray-500">
+                              Path: {fan.tpacpi || fan.hwmon || fan.path || 'Unknown'}
+                            </p>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="text-sm">Type: {fan.type}</span>
+                            <span className="text-sm">
+                              Type: {fan.type || (fan.tpacpi ? 'TPACPI' : 'HWMON')}
+                            </span>
                           </div>
                         </div>
                       </div>
@@ -345,41 +412,79 @@ const ThinkfanConfig = () => {
                         {editingLevel === index ? (
                           <div className="space-y-4">
                             <div>
-                              <label className="text-sm font-medium">Level</label>
+                              <label className="text-sm font-medium">Fan Speed Level</label>
                               <Input
                                 type="number"
                                 value={pendingChanges[index].speed}
                                 onChange={(e) => handleLevelChange(index, 'speed', parseInt(e.target.value))}
                               />
                             </div>
-                            <div>
-                              <label className="text-sm font-medium">Low Temperature (°C)</label>
-                              <Input
-                                type="number"
-                                value={pendingChanges[index].lower_limit?.[0] ?? 0}
-                                onChange={(e) => handleTemperatureBoundaryChange(index, false, parseInt(e.target.value))}
-                              />
-                            </div>
-                            <div>
-                              <label className="text-sm font-medium">High Temperature (°C)</label>
-                              <Input
-                                type="number"
-                                value={pendingChanges[index].upper_limit[0]}
-                                onChange={(e) => handleTemperatureBoundaryChange(index, true, parseInt(e.target.value))}
-                              />
-                            </div>
+                            {activeSensors.map((sensor, sensorIndex) => (
+                              <div key={sensor.path} className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                  <h4 className="font-medium text-sm">{sensor.name}</h4>
+                                  {sensor.currentTemp && (
+                                    <span className="text-xs text-gray-500">
+                                      Current: {sensor.currentTemp}°C
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <div>
+                                    <label className="text-xs text-gray-500">Low Temperature (°C)</label>
+                                    <Input
+                                      type="number"
+                                      value={pendingChanges[index].lower_limit?.[sensorIndex] ?? 0}
+                                      onChange={(e) => handleTemperatureBoundaryChange(
+                                        index,
+                                        false,
+                                        sensorIndex,
+                                        parseInt(e.target.value)
+                                      )}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-xs text-gray-500">High Temperature (°C)</label>
+                                    <Input
+                                      type="number"
+                                      value={pendingChanges[index].upper_limit[sensorIndex] ?? 0}
+                                      onChange={(e) => handleTemperatureBoundaryChange(
+                                        index,
+                                        true,
+                                        sensorIndex,
+                                        parseInt(e.target.value)
+                                      )}
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
                             <div className="flex gap-2">
                               <Button variant="outline" onClick={handleLevelCancel}>Cancel</Button>
-                              <Button variant="outline" onClick={handleApplyChanges} className="ml-auto">Apply Changes</Button>
+                              <Button variant="outline" onClick={handleApplyChanges} className="ml-auto">
+                                Apply Changes
+                              </Button>
                             </div>
                           </div>
                         ) : (
                           <div className="flex justify-between items-center">
                             <div>
                               <h3 className="font-medium">Level {level.speed}</h3>
-                              <p className="text-sm text-gray-500">
-                                {level.lower_limit?.[0] ?? 0}°C - {level.upper_limit[0]}°C
-                              </p>
+                              <div className="space-y-1">
+                                {activeSensors.map((sensor, sensorIndex) => (
+                                  <div key={sensor.path} className="text-sm">
+                                    <span className="font-medium">{sensor.name}</span>
+                                    <span className="text-gray-500">
+                                      : {level.lower_limit?.[sensorIndex] ?? 0}°C - {level.upper_limit[sensorIndex]}°C
+                                    </span>
+                                    {sensor.currentTemp && (
+                                      <span className="text-xs text-gray-400 ml-2">
+                                        (Current: {sensor.currentTemp}°C)
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                             <Button variant="outline" onClick={() => handleLevelEdit(index)}>
                               Edit

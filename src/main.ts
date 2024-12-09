@@ -11,62 +11,39 @@ const isDev = process.env.NODE_ENV === 'development'
 let mainWindow: BrowserWindow | null = null
 
 // Function to parse thinkfan config file
-async function parseThinkfanConfig(content: string) {
-  // Try parsing as YAML first
+async function parseThinkfanConfig(content: string): Promise<ThinkfanConfig> {
   try {
-    const yamlConfig = parseYAML(content) as ThinkfanConfig;
-    if (yamlConfig && typeof yamlConfig === 'object') {
-      // Transform YAML format to our internal format
-      return {
-        sensors: (yamlConfig.sensors || []).map((sensor: { hwmon?: string; tpacpi?: string }) => ({
-          type: sensor.hwmon ? 'hwmon' : 'tpacpi',
-          path: sensor.hwmon || sensor.tpacpi,
-          name: 'Temperature Sensor'
-        })),
-        fans: (yamlConfig.fans || []).map((fan: { tpacpi?: string; hwmon?: string }) => ({
-          type: fan.tpacpi ? 'tpacpi' : 'hwmon',
-          path: fan.tpacpi || fan.hwmon,
-          name: 'ThinkPad Fan'
-        })),
-        levels: (yamlConfig.levels || []).map((level: ThinkfanLevel) => ({
-          speed: level.speed,
-          lower_limit: level.lower_limit,
-          upper_limit: level.upper_limit
-        }))
-      };
+    const config = parseYAML(content);
+    
+    // Add names to sensors based on their paths
+    if (config.sensors) {
+      config.sensors = await Promise.all(config.sensors.map(async (sensor: any, index: number) => {
+        const path = sensor.hwmon || sensor.tpacpi || sensor.path;
+        try {
+          // Try to get sensor info from the system
+          const zones = await getAllThermalZones();
+          const matchingSensor = zones.find(zone => zone.path === path);
+          return {
+            ...sensor,
+            name: matchingSensor ? 
+              `${matchingSensor.sensorMatch?.name || 'Sensor'} (${matchingSensor.type})` : 
+              `Temperature Sensor ${index + 1}`
+          };
+        } catch (error) {
+          console.error('Error getting sensor info:', error);
+          return {
+            ...sensor,
+            name: `Temperature Sensor ${index + 1}`
+          };
+        }
+      }));
     }
-  } catch (e) {
-    console.log('Not a valid YAML format, trying legacy format...');
+    
+    return config;
+  } catch (error) {
+    console.error('Error parsing thinkfan config:', error);
+    throw error;
   }
-
-  // Fall back to traditional format parsing
-  const lines = content.split('\n').map(line => line.trim());
-  const sensors: Array<{ type: string; path: string; name: string }> = [];
-  const fans: Array<{ type: string; path: string; name: string }> = [];
-  const levels: Array<{ speed: number; lower_limit?: number[]; upper_limit: number[] }> = [];
-
-  for (const line of lines) {
-    if (line.startsWith('#') || line === '') continue;
-
-    if (line.startsWith('hwmon')) {
-      const [type, path] = line.split(/\s+/).filter(Boolean);
-      sensors.push({ type, path, name: 'Temperature Sensor' });
-    } else if (line.startsWith('tp_fan')) {
-      const [type, path] = line.split(/\s+/).filter(Boolean);
-      fans.push({ type, path, name: 'ThinkPad Fan' });
-    } else if (line.startsWith('(') && line.endsWith(')')) {
-      const values = line.replace(/[()]/g, '').split(',').map(v => parseInt(v.trim()));
-      if (values.length === 3) {
-        levels.push({
-          speed: values[0],
-          lower_limit: values.length > 1 ? [values[1]] : undefined,
-          upper_limit: [values[2]]
-        });
-      }
-    }
-  }
-
-  return { sensors, fans, levels };
 }
 
 // Register IPC handler before creating the window
@@ -105,10 +82,10 @@ ipcMain.handle('update-thinkfan-level', async (_event, { index, level }: {
       
       newConfig = {
         sensors: parsedConfig.sensors.map(sensor => ({
-          [sensor.type]: sensor.path
+          hwmon: sensor.hwmon || sensor.path || sensor.tpacpi
         })),
         fans: parsedConfig.fans.map(fan => ({
-          [fan.type]: fan.path
+          tpacpi: fan.tpacpi || fan.path
         })),
         levels
       };
@@ -148,10 +125,12 @@ ipcMain.handle('update-thinkfan-config', async (_event, levels: ThinkfanLevel[])
     
     let newConfig;
     if (format === 'yaml') {
-      // Create raw YAML string to ensure correct formatting
+      // Create raw YAML string preserving all sensors
       newConfig = [
         'sensors:',
-        `  - hwmon: ${parsedConfig.sensors[0].path}`,
+        ...parsedConfig.sensors.map(sensor => 
+          `  - hwmon: ${sensor.hwmon || sensor.tpacpi}`
+        ),
         '',
         'fans:',
         '  - tpacpi: /proc/acpi/ibm/fan',
@@ -159,8 +138,8 @@ ipcMain.handle('update-thinkfan-config', async (_event, levels: ThinkfanLevel[])
         'levels:',
         ...levels.map(level => [
           '  - speed: ' + level.speed,
-          ...(level.lower_limit ? [`    lower_limit: [${level.lower_limit[0]}]`] : []),
-          `    upper_limit: [${level.upper_limit[0]}]`
+          ...(level.lower_limit ? [`    lower_limit: [${level.lower_limit.join(', ')}]`] : []),
+          `    upper_limit: [${level.upper_limit.join(', ')}]`
         ]).flat()
       ].join('\n');
     }
@@ -200,7 +179,7 @@ ipcMain.handle('update-thinkfan-sensor', async (_event, sensorPath: string) => {
       newConfig = {
         sensors: [{ hwmon: sensorPath }],
         fans: parsedConfig.fans.map(fan => ({
-          [fan.type]: fan.path
+          [fan.type || 'unknown']: fan.path
         })),
         levels: parsedConfig.levels
       };
@@ -236,6 +215,57 @@ ipcMain.handle('get-sensor-reading', async (_event, sensorPath: string) => {
     return parseInt(content.trim()) / 1000; // Convert from millidegrees to degrees
   } catch (error) {
     console.error('Error reading sensor:', error);
+    throw error;
+  }
+});
+
+ipcMain.handle('add-thinkfan-sensor', async (_event, sensorPath: string) => {
+  try {
+    const { content, format } = await readThinkfanConfig();
+    const parsedConfig = await parseThinkfanConfig(content);
+    
+    // Add new sensor to the config
+    parsedConfig.sensors.push({ hwmon: sensorPath });
+    
+    // Update all levels to include a new temperature value for the new sensor
+    parsedConfig.levels = parsedConfig.levels.map(level => ({
+      ...level,
+      lower_limit: level.lower_limit ? 
+        [...level.lower_limit, level.lower_limit[0]] : 
+        undefined,
+      upper_limit: [...level.upper_limit, level.upper_limit[0]]
+    }));
+
+    let newConfig;
+    if (format === 'yaml') {
+      // Create raw YAML string with updated sensors and levels
+      newConfig = [
+        'sensors:',
+        ...parsedConfig.sensors.map(sensor => 
+          `  - hwmon: ${sensor.hwmon || sensor.tpacpi || sensor.path}`
+        ),
+        '',
+        'fans:',
+        '  - tpacpi: /proc/acpi/ibm/fan',
+        '',
+        'levels:',
+        ...parsedConfig.levels.map(level => [
+          '  - speed: ' + level.speed,
+          ...(level.lower_limit ? [`    lower_limit: [${level.lower_limit.join(', ')}]`] : []),
+          `    upper_limit: [${level.upper_limit.join(', ')}]`
+        ]).flat()
+      ].join('\n');
+    }
+    
+    if (!newConfig) {
+      throw new Error('Failed to generate config');
+    }
+
+    // Update the config file and restart thinkfan
+    const updatedConfig = await updateThinkfanConfig(newConfig, format);
+    return updatedConfig;
+  } catch (error) {
+    console.error('Error adding sensor to thinkfan config:', error);
     throw error;
   }
 });
