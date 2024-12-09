@@ -1,8 +1,8 @@
-import React from 'react';
 import { Card, CardContent } from '../elements/card';
 import { Button } from '../elements/button';
 import { Input } from '../elements/input';
-import { ThinkfanLevel } from '../../../types/thinkfan';
+import { ThinkfanLevel } from '../../../shared/types';
+import { useConfigStore } from '../../store';
 
 interface ActiveSensor {
   path: string;
@@ -15,10 +15,7 @@ interface LevelPanelProps {
   pendingChanges: ThinkfanLevel[];
   editingLevel: number | null;
   activeSensors: ActiveSensor[];
-  onLevelEdit: (index: number) => void;
-  onLevelChange: (index: number, field: keyof ThinkfanLevel, value: number) => void;
-  onTemperatureBoundaryChange: (index: number, isHigh: boolean, sensorIndex: number, value: number) => void;
-  onLevelCancel: () => void;
+  onLevelEdit: (index: number | null) => void;
   onApplyChanges: () => void;
 }
 
@@ -28,11 +25,69 @@ export function LevelPanel({
   editingLevel,
   activeSensors,
   onLevelEdit,
-  onLevelChange,
-  onTemperatureBoundaryChange,
-  onLevelCancel,
   onApplyChanges
 }: LevelPanelProps) {
+  const { setError, setPendingChanges } = useConfigStore();
+
+  const handleTemperatureBoundaryChange = (index: number, isHigh: boolean, sensorIndex: number, value: number) => {
+    const newLevels = [...pendingChanges];
+    
+    if (value < 0) {
+      setError('Temperature values must be positive');
+      return;
+    }
+
+    if (isHigh) {
+      const currentLimits = [...(newLevels[index].upper_limit || [])];
+      currentLimits[sensorIndex] = value;
+      
+      if (newLevels[index].lower_limit && value < newLevels[index].lower_limit[sensorIndex]) {
+        setError('Upper limit cannot be lower than lower limit');
+        return;
+      }
+      
+      newLevels[index] = { ...newLevels[index], upper_limit: currentLimits };
+
+      if (index < newLevels.length - 1) {
+        const nextLowerLimits = [...(newLevels[index + 1].lower_limit || [])];
+        nextLowerLimits[sensorIndex] = value;
+        newLevels[index + 1] = { ...newLevels[index + 1], lower_limit: nextLowerLimits };
+      }
+    } else {
+      const currentLimits = [...(newLevels[index].lower_limit || [])];
+      currentLimits[sensorIndex] = value;
+      
+      if (value > newLevels[index].upper_limit[sensorIndex]) {
+        setError('Lower limit cannot be higher than upper limit');
+        return;
+      }
+      
+      newLevels[index] = { ...newLevels[index], lower_limit: currentLimits };
+
+      if (index > 0) {
+        const prevUpperLimits = [...(newLevels[index - 1].upper_limit || [])];
+        prevUpperLimits[sensorIndex] = value;
+        newLevels[index - 1] = { ...newLevels[index - 1], upper_limit: prevUpperLimits };
+      }
+    }
+    
+    setError(null);
+    setPendingChanges(newLevels);
+  };
+
+  const handleLevelChange = (index: number, field: keyof ThinkfanLevel, value: number) => {
+    const newLevels = [...pendingChanges];
+    if (field === 'speed') {
+      newLevels[index] = { ...newLevels[index], speed: value };
+    }
+    setPendingChanges(newLevels);
+  };
+
+  const handleLevelCancel = () => {
+    setPendingChanges(levels);
+    onLevelEdit(null);
+  };
+
   return (
     <Card>
       <CardContent className="mt-4">
@@ -46,7 +101,7 @@ export function LevelPanel({
                     <Input
                       type="number"
                       value={pendingChanges[index].speed}
-                      onChange={(e) => onLevelChange(index, 'speed', parseInt(e.target.value))}
+                      onChange={(e) => handleLevelChange(index, 'speed', parseInt(e.target.value))}
                     />
                   </div>
                   {activeSensors.map((sensor, sensorIndex) => (
@@ -65,7 +120,7 @@ export function LevelPanel({
                           <Input
                             type="number"
                             value={pendingChanges[index].lower_limit?.[sensorIndex] ?? 0}
-                            onChange={(e) => onTemperatureBoundaryChange(
+                            onChange={(e) => handleTemperatureBoundaryChange(
                               index,
                               false,
                               sensorIndex,
@@ -78,7 +133,7 @@ export function LevelPanel({
                           <Input
                             type="number"
                             value={pendingChanges[index].upper_limit[sensorIndex] ?? 0}
-                            onChange={(e) => onTemperatureBoundaryChange(
+                            onChange={(e) => handleTemperatureBoundaryChange(
                               index,
                               true,
                               sensorIndex,
@@ -90,7 +145,7 @@ export function LevelPanel({
                     </div>
                   ))}
                   <div className="flex gap-2">
-                    <Button variant="outline" onClick={onLevelCancel}>Cancel</Button>
+                    <Button variant="outline" onClick={handleLevelCancel}>Cancel</Button>
                     <Button variant="outline" onClick={onApplyChanges} className="ml-auto">
                       Apply Changes
                     </Button>

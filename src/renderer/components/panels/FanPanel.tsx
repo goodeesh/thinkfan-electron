@@ -1,6 +1,5 @@
-import React from 'react';
 import { Card, CardContent } from '../elements/card';
-import { ThinkfanFan } from '../../../types/thinkfan';
+import { ThinkfanFan } from '../../../shared/types';
 
 interface FanPanelProps {
   fans: ThinkfanFan[];

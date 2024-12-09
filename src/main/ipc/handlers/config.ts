@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron';
 import { ThinkfanService } from '../../services/ThinkfanService';
-import { ThinkfanLevel, ThinkfanSensor } from '../../../types/thinkfan';
+import { ThinkfanLevel, ThinkfanSensor, ThinkfanFan } from '../../../shared/types';
 
 export function setupConfigHandlers() {
   const thinkfanService = ThinkfanService.getInstance();
@@ -40,12 +40,22 @@ export function setupConfigHandlers() {
       
       const newConfig = [
         'sensors:',
-        ...parsedConfig.sensors.map((sensor: ThinkfanSensor) => 
-          `  - hwmon: ${sensor.hwmon || sensor.tpacpi}`
-        ),
+        ...parsedConfig.sensors.map((sensor: ThinkfanSensor) => {
+          const sensorConfig = [];
+          if (sensor.hwmon) sensorConfig.push(`hwmon: ${sensor.hwmon}`);
+          if (sensor.tpacpi) sensorConfig.push(`tpacpi: ${sensor.tpacpi}`);
+          if (sensor.name) sensorConfig.push(`name: ${sensor.name}`);
+          return `  - ${sensorConfig.join('\n    ')}`;
+        }),
         '',
         'fans:',
-        '  - tpacpi: /proc/acpi/ibm/fan',
+        ...parsedConfig.fans.map((fan: ThinkfanFan) => {
+          const fanConfig = [];
+          if (fan.tpacpi) fanConfig.push(`tpacpi: ${fan.tpacpi}`);
+          if (fan.hwmon) fanConfig.push(`hwmon: ${fan.hwmon}`);
+          if (fan.type) fanConfig.push(`type: ${fan.type}`);
+          return `  - ${fanConfig.join('\n    ')}`;
+        }),
         '',
         'levels:',
         ...levels.map(level => [
