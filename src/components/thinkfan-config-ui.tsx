@@ -167,6 +167,10 @@ const ThinkfanConfig = () => {
   const handleSensorRemove = async (sensorPath: string) => {
     try {
       setError(null);
+      if (activeSensors.length <= 1) {
+        setError('At least one sensor needs to be selected');
+        return;
+      }
       const updatedConfig = await ipcRenderer.invoke('remove-thinkfan-sensor', sensorPath);
       setConfigData(updatedConfig);
       setActiveSensors(prev => prev.filter(s => s.path !== sensorPath));

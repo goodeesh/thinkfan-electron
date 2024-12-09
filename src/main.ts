@@ -275,6 +275,10 @@ ipcMain.handle('remove-thinkfan-sensor', async (_event, sensorPath: string) => {
     const { content, format } = await readThinkfanConfig();
     const parsedConfig = await parseThinkfanConfig(content);
     
+    if (parsedConfig.sensors.length <= 1) {
+      throw new Error('At least one sensor needs to be selected');
+    }
+    
     // Find the index of the sensor to remove
     const sensorIndex = parsedConfig.sensors.findIndex(
       s => (s.hwmon || s.tpacpi || s.path) === sensorPath
