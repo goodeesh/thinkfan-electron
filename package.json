@@ -1,13 +1,19 @@
 {
   "name": "thinkfan-electron",
   "version": "1.0.0",
-  "main": "./dist/src/main.js",
+  "description": "ThinkFan configuration utility",
+  "author": {
+    "name": "Your Name",
+    "email": "your.email@example.com"
+  },
+  "main": "dist/main/index.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development tsc -w -p electron/tsconfig.json\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
-    "electron:build": "vite build && tsc -p electron/tsconfig.json && electron-builder",
-    "preview": "vite preview"
+    "electron:dev": "concurrently \"vite\" \"wait-on tcp:5173 && cross-env NODE_ENV=development tsc -w -p tsconfig.electron.json\" \"wait-on tcp:5173 && cross-env NODE_ENV=development electron .\"",
+    "electron:build": "npm run clean && vite build && tsc -p tsconfig.electron.json && electron-builder",
+    "preview": "vite preview",
+    "clean": "rm -rf dist release"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.1.0",
@@ -15,7 +21,6 @@
     "@shadcn/ui": "^0.0.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "electron-is-dev": "^3.0.1",
     "lucide-react": "^0.294.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -39,5 +44,21 @@
     "typescript": "^5.7.2",
     "vite": "^5.0.0",
     "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.thinkfan.electron",
+    "productName": "ThinkFan Configuration",
+    "files": [
+      "dist/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility",
+      "maintainer": "Your Name <your.email@example.com>"
+    }
   }
 }

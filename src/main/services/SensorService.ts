@@ -16,46 +16,6 @@ export class SensorService {
   public async getAllThermalZones(): Promise<ActiveSensor[]> {
     try {
       const thermalZones: ActiveSensor[] = [];
-      const hwmonDir = '/sys/class/hwmon';
-      const dirs = await fs.readdir(hwmonDir);
-
-      for (const dir of dirs) {
-        const basePath = `${hwmonDir}/${dir}`;
-        try {
-          const name = await fs.readFile(`${basePath}/name`, 'utf-8');
-          const files = await fs.readdir(basePath);
-          
-          for (const file of files) {
-            if (file.endsWith('_input') && file.includes('temp')) {
-              const tempPath = `${basePath}/${file}`;
-              const labelFile = file.replace('_input', '_label');
-              
-              let sensorName = '';
-              try {
-                sensorName = await fs.readFile(`${basePath}/${labelFile}`, 'utf-8');
-              } catch {
-                sensorName = file.replace('_input', '');
-              }
-
-              const temp = parseInt(await fs.readFile(tempPath, 'utf-8')) / 1000;
-              
-              thermalZones.push({
-                name: sensorName.trim(),
-                path: tempPath,
-                type: name.trim(),
-                currentTemp: temp,
-                sensorMatch: {
-                  name: sensorName.trim(),
-                  adapter: name.trim()
-                }
-              });
-            }
-          }
-        } catch (error) {
-          console.error(`Error processing ${dir}:`, error);
-        }
-      }
-
       // Also check ACPI thermal zones
       try {
         const thermalDir = '/sys/class/thermal';
@@ -63,32 +23,75 @@ export class SensorService {
         
         for (const zone of zones) {
           if (zone.startsWith('thermal_zone')) {
-            const basePath = `${thermalDir}/${zone}`;
             try {
-              const type = await fs.readFile(`${basePath}/type`, 'utf-8');
-              const temp = parseInt(await fs.readFile(`${basePath}/temp`, 'utf-8')) / 1000;
-              
-              thermalZones.push({
-                name: type.trim(),
-                path: `${basePath}/temp`,
-                type: type.trim(),
-                currentTemp: temp,
-                sensorMatch: {
-                  name: type.trim(),
-                  adapter: type.trim()
+              const dirs = await fs.readdir(`${thermalDir}/${zone}`);
+              for (const dir of dirs) {
+                const typePath = `${thermalDir}/${zone}/type`;
+                if (dir.startsWith('hwmon')) {
+                  try {
+                    const basePath = `${thermalDir}/${zone}/${dir}`;
+                    const files = await fs.readdir(basePath);
+                    const type = (await fs.readFile(typePath, 'utf-8')).trim();
+                    if (!type) {
+                      console.warn(files)
+                      console.warn(typePath)
+                      console.warn(`Empty type value in ${typePath}`);
+                      continue;
+                    }
+        
+                    for (const file of files) {
+                      if (file.endsWith('_input')) {
+                        try {
+                          const tempContent = await fs.readFile(`${basePath}/${file}`, 'utf-8');
+                          const tempValue = parseInt(tempContent.trim());
+                          
+                          // Validate temperature value
+                          if (isNaN(tempValue)) {
+                            console.warn(`Invalid temperature value in ${basePath}/${file}`);
+                            continue;
+                          }
+        
+                          const temp = tempValue / 1000;
+                          
+                          // Additional temperature sanity check (typically between -50°C and 150°C)
+                          if (temp < -50 || temp > 150) {
+                            console.warn(`Suspicious temperature value: ${temp}°C in ${basePath}/${file}`);
+                            continue;
+                          }
+        
+                          thermalZones.push({
+                            name: type,
+                            path: `${basePath}/${file}`,
+                            type: type,
+                            currentTemp: temp,
+                            sensorMatch: {
+                              name: type,
+                              adapter: type
+                            }
+                          });
+                        } catch (error) {
+                          console.error(`Error reading temperature from ${basePath}/${file}:`, error);
+                        }
+                      }
+                    }
+                  } catch (error) {
+                    console.error(`Error processing hwmon directory ${dir}:`, error);
+                  }
                 }
-              });
+              }
             } catch (error) {
-              console.error(`Error processing thermal zone ${zone}:`, error);
+              console.error('Error getting thermal zones:', error);
+              throw error;
             }
           }
         }
       } catch (error) {
-        console.error('Error processing thermal zones:', error);
+        console.error('Error getting thermal zones:', error);
+        throw error;
       }
-
       return thermalZones;
-    } catch (error) {
+    }
+    catch (error) {
       console.error('Error getting thermal zones:', error);
       throw error;
     }
