@@ -1,0 +1,1 @@
+This is a small project done solely for the purpose of managing my own thinkfan file and changue the configuration easily without having to edit from the terminal. I have added a GPLv3 (General Public License v3) and decided to make it open source.
